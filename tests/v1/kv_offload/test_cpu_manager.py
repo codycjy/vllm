@@ -14,6 +14,7 @@ from vllm.v1.kv_offload.abstract import (
 )
 from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
+from vllm.v1.kv_offload.lfu_manager import LFUOffloadingManager
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 
@@ -593,3 +594,177 @@ def test_filter_reused_manager():
     assert prepare_store_output.block_hashes_to_store == []
 
     manager.complete_store(to_hashes([1]))
+
+
+def test_lfu_manager_basic():
+    """
+    Tests LFUOffloadingManager basic operations with a CPUBackend.
+    Verifies that LFU evicts the least frequently used blocks.
+    """
+    block_size = 256
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
+    lfu_manager = LFUOffloadingManager(cpu_backend, enable_events=True)
+
+    # prepare and store [1, 2, 3, 4] - fills cache
+    prepare_store_output = lfu_manager.prepare_store(to_hashes([1, 2, 3, 4]))
+    verify_store_output(
+        prepare_store_output,
+        ExpectedPrepareStoreOutput(
+            block_hashes_to_store=[1, 2, 3, 4],
+            store_block_ids=[0, 1, 2, 3],
+            block_hashes_evicted=[],
+        ),
+    )
+    lfu_manager.complete_store(to_hashes([1, 2, 3, 4]))
+
+    # verify initial frequencies (all blocks have freq=1)
+    assert lfu_manager.frequencies[to_hashes([1])[0]] == 1
+    assert lfu_manager.frequencies[to_hashes([2])[0]] == 1
+
+    # touch [1, 2, 3] multiple times to increase their frequency
+    lfu_manager.touch(to_hashes([1, 2, 3]))  # freq: 1->2, 2->2, 3->2
+    lfu_manager.touch(to_hashes([1, 2]))     # freq: 1->3, 2->3
+
+    # verify frequencies
+    assert lfu_manager.frequencies[to_hashes([1])[0]] == 3
+    assert lfu_manager.frequencies[to_hashes([2])[0]] == 3
+    assert lfu_manager.frequencies[to_hashes([3])[0]] == 2
+    assert lfu_manager.frequencies[to_hashes([4])[0]] == 1
+
+    # store block 5 - should evict block 4 (lowest frequency)
+    prepare_store_output = lfu_manager.prepare_store(to_hashes([5]))
+    verify_store_output(
+        prepare_store_output,
+        ExpectedPrepareStoreOutput(
+            block_hashes_to_store=[5],
+            store_block_ids=[3],  # reuses block 4's storage
+            block_hashes_evicted=[4],
+        ),
+    )
+
+
+def test_lfu_manager_frequency_tie_breaking():
+    """
+    Tests that when multiple blocks have the same frequency,
+    LFU uses LRU as tie-breaker (evicts least recently used).
+    """
+    block_size = 256
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=3)
+    lfu_manager = LFUOffloadingManager(cpu_backend, enable_events=False)
+
+    # store [1, 2, 3]
+    lfu_manager.prepare_store(to_hashes([1, 2, 3]))
+    lfu_manager.complete_store(to_hashes([1, 2, 3]))
+
+    # all have frequency=1, but different recency
+    # touch [3, 2] to make block 1 the LRU among blocks with freq=1
+    lfu_manager.touch(to_hashes([3, 2]))
+
+    # frequencies: 1->2, 2->2, 3->2 (all same)
+    # recency order (LRU to MRU): 1, 3, 2
+
+    # store block 4 - should evict block 1 (LRU among same frequency)
+    output = lfu_manager.prepare_store(to_hashes([4]))
+    assert output is not None
+    assert output.block_hashes_evicted == to_hashes([1])
+
+
+def test_lfu_manager_with_load():
+    """
+    Tests that blocks being loaded (ref_cnt > 0) cannot be evicted.
+    """
+    block_size = 256
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=3)
+    lfu_manager = LFUOffloadingManager(cpu_backend, enable_events=False)
+
+    # store [1, 2, 3]
+    lfu_manager.prepare_store(to_hashes([1, 2, 3]))
+    lfu_manager.complete_store(to_hashes([1, 2, 3]))
+
+    # block 1 has lowest frequency, but we're loading it
+    lfu_manager.prepare_load(to_hashes([1]))
+
+    # try to store [4, 5] - should fail because we can only evict 2 blocks
+    # but block 1 (lowest freq) is being loaded
+    assert lfu_manager.prepare_store(to_hashes([4, 5])) is None
+
+    # complete load
+    lfu_manager.complete_load(to_hashes([1]))
+
+    # now should be able to store [4] (will evict block 1)
+    output = lfu_manager.prepare_store(to_hashes([4]))
+    assert output is not None
+
+
+def test_lfu_manager_mixed_frequencies():
+    """
+    Comprehensive test with blocks at different frequency levels.
+    """
+    block_size = 256
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
+    lfu_manager = LFUOffloadingManager(cpu_backend, enable_events=True)
+
+    # store [1, 2, 3, 4]
+    lfu_manager.prepare_store(to_hashes([1, 2, 3, 4]))
+    lfu_manager.complete_store(to_hashes([1, 2, 3, 4]))
+
+    # create different frequency levels:
+    # block 1: freq=4 (hottest)
+    # block 2: freq=3
+    # block 3: freq=2
+    # block 4: freq=1 (coldest)
+    lfu_manager.touch(to_hashes([1, 1, 1]))  # 1->2, 1->3, 1->4
+    lfu_manager.touch(to_hashes([2, 2]))     # 2->2, 2->3
+    lfu_manager.touch(to_hashes([3]))        # 3->2
+
+    # verify frequencies
+    assert lfu_manager.frequencies[to_hashes([1])[0]] == 4
+    assert lfu_manager.frequencies[to_hashes([2])[0]] == 3
+    assert lfu_manager.frequencies[to_hashes([3])[0]] == 2
+    assert lfu_manager.frequencies[to_hashes([4])[0]] == 1
+
+    # store block 5 - should evict block 4 (lowest frequency)
+    output = lfu_manager.prepare_store(to_hashes([5]))
+    assert output is not None
+    assert output.block_hashes_evicted == to_hashes([4])
+    lfu_manager.complete_store(to_hashes([5]))
+
+    # store block 6 - should evict block 3 (next lowest frequency)
+    output = lfu_manager.prepare_store(to_hashes([6]))
+    assert output is not None
+    assert output.block_hashes_evicted == to_hashes([3])
+    lfu_manager.complete_store(to_hashes([6]))
+
+    # verify blocks 1 and 2 (highest frequency) are still in cache
+    assert lfu_manager.lookup(to_hashes([1])) == 1
+    assert lfu_manager.lookup(to_hashes([2])) == 1
+
+    # verify events
+    events = list(lfu_manager.take_events())
+    assert len(events) > 0
+
+
+@pytest.mark.parametrize("manager_class", [LRUOffloadingManager, ARCOffloadingManager, LFUOffloadingManager])
+def test_all_managers_basic_compatibility(manager_class):
+    """
+    Tests that all manager types (LRU, ARC, LFU) handle basic operations correctly.
+    """
+    block_size = 256
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
+    manager = manager_class(cpu_backend, enable_events=False)
+
+    # store [1, 2]
+    manager.prepare_store(to_hashes([1, 2]))
+    manager.complete_store(to_hashes([1, 2]))
+
+    # lookup should succeed
+    assert manager.lookup(to_hashes([1, 2])) == 2
+
+    # store [3, 4, 5] - should evict one block
+    output = manager.prepare_store(to_hashes([3, 4, 5]))
+    assert output is not None
+    assert len(output.block_hashes_evicted) == 1
+    manager.complete_store(to_hashes([3, 4, 5]))
+
+    # at least 4 blocks should be in cache now
+    assert manager.lookup(to_hashes([2, 3, 4, 5])) >= 3

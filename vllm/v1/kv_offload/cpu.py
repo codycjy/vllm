@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
+from vllm.v1.kv_offload.lfu_manager import LFUOffloadingManager
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
@@ -79,10 +80,14 @@ class CPUOffloadingSpec(OffloadingSpec):
                 self._manager = ARCOffloadingManager(
                     backend=backend, enable_events=enable_events
                 )
+            elif self.eviction_policy == "lfu":
+                self._manager = LFUOffloadingManager(
+                    backend=backend, enable_events=enable_events
+                )
             else:
                 raise ValueError(
                     f"Unknown eviction policy: {self.eviction_policy}. "
-                    f"Supported policies: lru, arc"
+                    f"Supported policies: lru, arc, lfu"
                 )
 
             # store_threshold: how many times a block must appear in lookup()
