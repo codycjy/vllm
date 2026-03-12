@@ -1,0 +1,15 @@
+{
+  "description": "Multi-user chat application with varying sharing patterns",
+  "queries": [
+    "System: You are a helpful assistant.\nUser: What is AI?",
+    "System: You are a helpful assistant.\nUser: Explain machine learning.",
+    "System: You are a code expert.\nUser: Write a Python function to sort.",
+    "System: You are a helpful assistant.\nUser: What is AI?",
+    "System: You are a code expert.\nUser: Explain recursion.",
+    "System: You are a helpful assistant.\nUser: Benefits of exercise?",
+    "System: You are a helpful assistant.\nUser: What is AI?",
+    "System: You are a code expert.\nUser: What are design patterns?"
+  ],
+  "expected_sharing": "medium",
+  "notes": "Some prompts share 'You are a helpful assistant', others share 'You are a code expert', and some queries repeat exactly"
+}

@@ -1,0 +1,15 @@
+{
+  "description": "Customer support chatbot with shared knowledge base context",
+  "shared_prefix": "You are a customer support agent for TechCorp. Use the following knowledge base:\n\nProduct Info:\n- TechCorp Pro: $99/month, includes 24/7 support\n- TechCorp Basic: $29/month, email support only\n- Refund policy: 30-day money-back guarantee\n- Shipping: Free for orders over $50\n\nCommon Issues:\n- Password reset: Use 'Forgot Password' link\n- Billing questions: Check billing@techcorp.com\n- Technical support: support@techcorp.com\n\nUser Query: ",
+  "queries": [
+    "How much does TechCorp Pro cost?",
+    "What's your refund policy?",
+    "I forgot my password, what should I do?",
+    "Do you offer free shipping?",
+    "How can I contact billing support?",
+    "What's the difference between Pro and Basic plans?",
+    "Can I get a refund after 30 days?",
+    "I have a technical issue with my account"
+  ],
+  "expected_sharing": "high"
+}

@@ -1,0 +1,13 @@
+{
+  "description": "Code review assistant with shared repository context",
+  "shared_prefix": "# Repository: payment-service\n# File: payment_processor.py\n\nimport stripe\nfrom typing import Dict, Optional\n\nclass PaymentProcessor:\n    def __init__(self, api_key: str):\n        self.stripe = stripe\n        self.stripe.api_key = api_key\n        \n    def create_charge(self, amount: int, currency: str, source: str) -> Dict:\n        \"\"\"Create a charge using Stripe API.\"\"\"\n        try:\n            charge = self.stripe.Charge.create(\n                amount=amount,\n                currency=currency,\n                source=source\n            )\n            return {\"success\": True, \"charge_id\": charge.id}\n        except Exception as e:\n            return {\"success\": False, \"error\": str(e)}\n\nReview this code for: ",
+  "queries": [
+    "security vulnerabilities",
+    "error handling improvements",
+    "performance optimization opportunities",
+    "code style and best practices",
+    "missing type hints",
+    "potential race conditions"
+  ],
+  "expected_sharing": "high"
+}

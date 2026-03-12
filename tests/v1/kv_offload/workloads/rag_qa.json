@@ -1,0 +1,13 @@
+{
+  "description": "RAG-based Q&A with shared document context",
+  "shared_prefix": "Based on the following research paper excerpt:\n\nTitle: Advances in Large Language Models\n\nAbstract: Recent developments in large language models (LLMs) have revolutionized natural language processing. Key innovations include the transformer architecture, which enables parallel processing of sequential data, and self-attention mechanisms that allow models to weigh the importance of different parts of the input. Training these models requires massive datasets and computational resources. Models like GPT-3 and BERT have demonstrated remarkable performance across various NLP tasks, including translation, summarization, and question answering. However, challenges remain in areas such as factual accuracy, bias mitigation, and computational efficiency.\n\nQuestion: ",
+  "queries": [
+    "What architecture do modern LLMs use?",
+    "What are the main innovations in LLMs?",
+    "What challenges do LLMs face?",
+    "What tasks can models like GPT-3 perform?",
+    "What is self-attention?",
+    "Why do LLMs require massive computational resources?"
+  ],
+  "expected_sharing": "high"
+}
