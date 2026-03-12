@@ -12,6 +12,7 @@ from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lfu_manager import LFUOffloadingManager
+from vllm.v1.kv_offload.lru_k_manager import LRUKOffloadingManager
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
@@ -84,10 +85,24 @@ class CPUOffloadingSpec(OffloadingSpec):
                 self._manager = LFUOffloadingManager(
                     backend=backend, enable_events=enable_events
                 )
+            elif self.eviction_policy.startswith("lru-"):
+                # LRU-K with configurable K (e.g., "lru-2", "lru-3")
+                try:
+                    k = int(self.eviction_policy.split("-")[1])
+                    if k < 1:
+                        raise ValueError("K must be >= 1")
+                except (IndexError, ValueError) as e:
+                    raise ValueError(
+                        f"Invalid LRU-K policy format: {self.eviction_policy}. "
+                        f"Use format 'lru-K' where K is a positive integer (e.g., 'lru-2')"
+                    ) from e
+                self._manager = LRUKOffloadingManager(
+                    backend=backend, k=k, enable_events=enable_events
+                )
             else:
                 raise ValueError(
                     f"Unknown eviction policy: {self.eviction_policy}. "
-                    f"Supported policies: lru, arc, lfu"
+                    f"Supported policies: lru, arc, lfu, lru-K (e.g., lru-2, lru-3)"
                 )
 
             # store_threshold: how many times a block must appear in lookup()

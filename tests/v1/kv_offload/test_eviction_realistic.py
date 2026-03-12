@@ -177,7 +177,7 @@ def prepare_prompts_from_workload(workload: dict) -> list[str]:
     not current_platform.is_cuda(), reason="Requires CUDA for realistic testing"
 )
 @pytest.mark.parametrize("workload_name", ["chat_application", "few_shot_learning"])
-@pytest.mark.parametrize("eviction_policy", ["lru", "arc", "lfu"])
+@pytest.mark.parametrize("eviction_policy", ["lru", "arc", "lfu", "lru-2"])
 def test_eviction_policy_on_workload(workload_name: str, eviction_policy: str):
     """
     Test eviction policy performance on realistic workloads.
@@ -259,7 +259,7 @@ def test_compare_eviction_policies_on_chat_workload():
 
     results = {}
 
-    for policy in ["lru", "arc", "lfu"]:
+    for policy in ["lru", "arc", "lfu", "lru-2"]:
         kv_transfer_config = KVTransferConfig(
             kv_connector="OffloadingConnector",
             kv_role="kv_both",

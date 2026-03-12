@@ -15,6 +15,7 @@ from vllm.v1.kv_offload.abstract import (
 from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lfu_manager import LFUOffloadingManager
+from vllm.v1.kv_offload.lru_k_manager import LRUKOffloadingManager
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 
@@ -744,7 +745,112 @@ def test_lfu_manager_mixed_frequencies():
     assert len(events) > 0
 
 
-@pytest.mark.parametrize("manager_class", [LRUOffloadingManager, ARCOffloadingManager, LFUOffloadingManager])
+def test_lru_k_manager_basic():
+    """
+    Tests LRUKOffloadingManager basic operations with K=2 (LRU-2).
+    Verifies that blocks with fewer accesses are evicted first, and among
+    blocks with same access count, the one with oldest K-th access is evicted.
+    """
+    block_size = 256
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
+    lru2_manager = LRUKOffloadingManager(cpu_backend, k=2, enable_events=True)
+
+    # prepare and store [1, 2, 3, 4] - fills cache
+    prepare_store_output = lru2_manager.prepare_store(to_hashes([1, 2, 3, 4]))
+    verify_store_output(
+        prepare_store_output,
+        ExpectedPrepareStoreOutput(
+            block_hashes_to_store=[1, 2, 3, 4],
+            store_block_ids=[0, 1, 2, 3],
+            block_hashes_evicted=[],
+        ),
+    )
+    lru2_manager.complete_store(to_hashes([1, 2, 3, 4]))
+
+    # All blocks have only 1 access so far (< K=2)
+    # Touch blocks [1, 2, 3] to give them a second access
+    lru2_manager.touch(to_hashes([1, 2, 3]))
+
+    # Now: [1, 2, 3] have 2 accesses (full history), [4] has 1 access
+    # When storing [5], should evict [4] (insufficient history)
+    prepare_store_output = lru2_manager.prepare_store(to_hashes([5]))
+    verify_store_output(
+        prepare_store_output,
+        ExpectedPrepareStoreOutput(
+            block_hashes_to_store=[5],
+            store_block_ids=[3],  # reuses block 4's storage
+            block_hashes_evicted=[4],
+        ),
+    )
+    lru2_manager.complete_store(to_hashes([5]))
+
+    # Touch [1] again - now [1] has 3 accesses, history keeps last 2
+    lru2_manager.touch(to_hashes([1]))
+
+    # Store [6] - all remaining blocks [1, 2, 3, 5] have K=2 accesses
+    # Should evict the one with oldest 2nd-most-recent access (oldest K-th)
+    # That would be [2] (accessed earliest among those with 2 accesses)
+    prepare_store_output = lru2_manager.prepare_store(to_hashes([6]))
+    assert len(prepare_store_output.block_hashes_evicted) == 1
+
+
+def test_lru_k_with_different_k_values():
+    """
+    Tests that different K values affect eviction behavior.
+    """
+    block_size = 256
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=3)
+
+    # Test with K=1 (equivalent to standard LRU)
+    lru1_manager = LRUKOffloadingManager(cpu_backend, k=1, enable_events=False)
+    lru1_manager.prepare_store(to_hashes([1, 2, 3]))
+    lru1_manager.complete_store(to_hashes([1, 2, 3]))
+    lru1_manager.touch(to_hashes([2, 3]))  # [1] is now least recently used
+    output = lru1_manager.prepare_store(to_hashes([4]))
+    assert output.block_hashes_evicted == to_hashes([1])
+
+    # Test with K=3
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=3)
+    lru3_manager = LRUKOffloadingManager(cpu_backend, k=3, enable_events=False)
+    lru3_manager.prepare_store(to_hashes([1, 2, 3]))
+    lru3_manager.complete_store(to_hashes([1, 2, 3]))
+
+    # Give [1, 2] three accesses, [3] only one
+    lru3_manager.touch(to_hashes([1, 2]))
+    lru3_manager.touch(to_hashes([1, 2]))
+
+    # [3] has insufficient history (< 3 accesses), should be evicted first
+    output = lru3_manager.prepare_store(to_hashes([4]))
+    assert output.block_hashes_evicted == to_hashes([3])
+
+
+def test_lru_k_manager_with_load():
+    """
+    Tests that LRU-K manager correctly handles load operations.
+    """
+    block_size = 256
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=2)
+    lru2_manager = LRUKOffloadingManager(cpu_backend, k=2, enable_events=True)
+
+    # store blocks [1, 2]
+    lru2_manager.prepare_store(to_hashes([1, 2]))
+    lru2_manager.complete_store(to_hashes([1, 2]))
+
+    # load block [1]
+    prepare_load_output = lru2_manager.prepare_load(to_hashes([1]))
+    assert prepare_load_output is not None
+    assert len(prepare_load_output.block_hashes_to_load) == 1
+    lru2_manager.complete_load(to_hashes([1]))
+
+    # verify block [1] can be looked up
+    assert lru2_manager.lookup(to_hashes([1])) == 1
+
+    # verify events
+    events = list(lru2_manager.take_events())
+    assert len(events) > 0
+
+
+@pytest.mark.parametrize("manager_class", [LRUOffloadingManager, ARCOffloadingManager, LFUOffloadingManager, LRUKOffloadingManager])
 def test_all_managers_basic_compatibility(manager_class):
     """
     Tests that all manager types (LRU, ARC, LFU) handle basic operations correctly.
