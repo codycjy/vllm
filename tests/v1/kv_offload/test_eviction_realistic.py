@@ -375,7 +375,12 @@ def test_eviction_policy_on_wildchat(scale: str, eviction_policy: str):
     """
     from tests.v1.kv_offload.wildchat_loader import get_wildchat_prompts
 
-    prompts = get_wildchat_prompts(scale=scale, interleave=True)
+    model = "facebook/opt-1.3b"
+    max_model_len = 2048
+
+    prompts = get_wildchat_prompts(
+        scale=scale, interleave=True, max_model_len=max_model_len,
+    )
     assert len(prompts) > 0, f"No prompts loaded from WildChat (scale={scale})"
 
     kv_transfer_config = KVTransferConfig(
@@ -389,8 +394,9 @@ def test_eviction_policy_on_wildchat(scale: str, eviction_policy: str):
     )
 
     llm = LLM(
-        model="facebook/opt-125m",
-        gpu_memory_utilization=0.3,
+        model=model,
+        max_model_len=max_model_len,
+        gpu_memory_utilization=0.4,
         kv_transfer_config=kv_transfer_config,
         enable_prefix_caching=True,
     )
@@ -429,7 +435,12 @@ def test_compare_eviction_policies_on_wildchat():
     """
     from tests.v1.kv_offload.wildchat_loader import get_wildchat_prompts
 
-    prompts = get_wildchat_prompts(scale="small", interleave=True)
+    model = "facebook/opt-1.3b"
+    max_model_len = 2048
+
+    prompts = get_wildchat_prompts(
+        scale="small", interleave=True, max_model_len=max_model_len,
+    )
     assert len(prompts) > 0, "No prompts loaded from WildChat"
 
     results = {}
@@ -446,8 +457,9 @@ def test_compare_eviction_policies_on_wildchat():
         )
 
         llm = LLM(
-            model="facebook/opt-125m",
-            gpu_memory_utilization=0.3,
+            model=model,
+            max_model_len=max_model_len,
+            gpu_memory_utilization=0.4,
             kv_transfer_config=kv_transfer_config,
             enable_prefix_caching=True,
         )

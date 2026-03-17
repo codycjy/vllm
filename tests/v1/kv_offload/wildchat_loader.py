@@ -36,6 +36,7 @@ def load_wildchat(
     language: str = "English",
     seed: int = 42,
     stratified: bool = True,
+    max_chars: int = 0,
 ) -> list[list[str]]:
     """
     Load and sample conversations from WildChat dataset.
@@ -45,6 +46,8 @@ def load_wildchat(
         language: Filter by language (default: English)
         seed: Random seed for reproducibility
         stratified: Whether to stratify by turn count category
+        max_chars: Max character length per prompt (0 = no limit).
+                   Use model_max_tokens * 3 as a safe estimate.
 
     Returns:
         List of conversations, where each conversation is a list of
@@ -84,7 +87,7 @@ def load_wildchat(
     else:
         conversations = _random_sample(ds, num_conversations, seed)
 
-    return [_expand_conversation(conv) for conv in conversations]
+    return [_expand_conversation(conv, max_chars=max_chars) for conv in conversations]
 
 
 def _random_sample(ds, n: int, seed: int) -> list[dict]:
@@ -127,7 +130,10 @@ def _stratified_sample(ds, n: int, seed: int) -> list[dict]:
     return result[:n]
 
 
-def _expand_conversation(row: dict) -> list[str]:
+def _expand_conversation(
+    row: dict,
+    max_chars: int = 0,
+) -> list[str]:
     """
     Expand a multi-turn conversation into incremental prompt sequences.
 
@@ -135,6 +141,12 @@ def _expand_conversation(row: dict) -> list[str]:
         prompt_1 = "user1"
         prompt_2 = "user1\\nassistant1\\nuser2"
         prompt_3 = "user1\\nassistant1\\nuser2\\nassistant2\\nuser3"
+
+    Args:
+        row: A WildChat conversation row.
+        max_chars: Maximum character length per prompt. 0 means no limit.
+                   Roughly 1 token ≈ 4 chars, so for a 4096-token model
+                   use max_chars=12000 to leave room for generation.
     """
     messages = row["conversation"]
     prompts = []
@@ -148,11 +160,15 @@ def _expand_conversation(row: dict) -> list[str]:
             accumulated += "\n"
         accumulated += f"{role}: {content}"
 
+        # Stop expanding if we'd exceed the context limit
+        if max_chars > 0 and len(accumulated) > max_chars:
+            break
+
         # Emit a prompt after each user message
         if role == "user":
             prompts.append(accumulated)
 
-    return prompts if prompts else [messages[0]["content"]]
+    return prompts if prompts else [messages[0]["content"][:max_chars or None]]
 
 
 def flatten_to_prompts(conversations: list[list[str]]) -> list[str]:
@@ -179,6 +195,7 @@ def get_wildchat_prompts(
     language: str = "English",
     seed: int = 42,
     interleave: bool = True,
+    max_model_len: int = 0,
 ) -> list[str]:
     """
     High-level API: get a flat list of prompts from WildChat.
@@ -189,12 +206,17 @@ def get_wildchat_prompts(
         seed: Random seed
         interleave: If True, interleave conversations (realistic);
                     if False, sequential (one conversation at a time)
+        max_model_len: Model's max context length in tokens. If > 0,
+                       prompts are truncated to fit (leaving room for output).
 
     Returns:
         Flat list of prompts ready for benchmarking
     """
+    # Reserve ~10% for generation tokens, convert tokens to chars (~4 chars/token)
+    max_chars = int(max_model_len * 0.9 * 4) if max_model_len > 0 else 0
+
     conversations = load_wildchat(
-        scale=scale, language=language, seed=seed
+        scale=scale, language=language, seed=seed, max_chars=max_chars,
     )
 
     if interleave:
