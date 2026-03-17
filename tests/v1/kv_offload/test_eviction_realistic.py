@@ -359,12 +359,21 @@ def test_workload_definitions_are_valid():
         )
 
 
+WILDCHAT_MODELS = [
+    pytest.param("facebook/opt-1.3b", 2048, 0.4, id="opt-1.3b"),
+    pytest.param("Qwen/Qwen3-8B", 16384, 0.9, id="qwen3-8b"),
+]
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Requires CUDA for realistic testing"
 )
 @pytest.mark.parametrize("scale", ["small"])
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc", "lfu", "lru-2"])
-def test_eviction_policy_on_wildchat(scale: str, eviction_policy: str):
+@pytest.mark.parametrize("model,max_model_len,gpu_util", WILDCHAT_MODELS)
+def test_eviction_policy_on_wildchat(
+    scale: str, eviction_policy: str, model: str, max_model_len: int, gpu_util: float
+):
     """
     Test eviction policy performance on WildChat real conversations.
 
@@ -374,9 +383,6 @@ def test_eviction_policy_on_wildchat(scale: str, eviction_policy: str):
     batches to simulate concurrent users.
     """
     from tests.v1.kv_offload.wildchat_loader import get_wildchat_prompts
-
-    model = "facebook/opt-1.3b"
-    max_model_len = 2048
 
     prompts = get_wildchat_prompts(
         scale=scale, interleave=True, max_model_len=max_model_len,
@@ -396,7 +402,7 @@ def test_eviction_policy_on_wildchat(scale: str, eviction_policy: str):
     llm = LLM(
         model=model,
         max_model_len=max_model_len,
-        gpu_memory_utilization=0.4,
+        gpu_memory_utilization=gpu_util,
         kv_transfer_config=kv_transfer_config,
         enable_prefix_caching=True,
     )
@@ -419,7 +425,7 @@ def test_eviction_policy_on_wildchat(scale: str, eviction_policy: str):
     total_time = sum(batch_latencies)
     throughput = len(prompts) / (total_time / 1000)  # prompts/sec
 
-    print(f"\n{eviction_policy.upper()} on WildChat ({scale}):")
+    print(f"\n{eviction_policy.upper()} on WildChat ({scale}, {model}):")
     print(f"  Prompts: {len(prompts)}, Batch size: {batch_size}")
     print(f"  Total time: {total_time:.0f}ms")
     print(f"  Avg batch latency: {avg_batch_latency:.2f}ms")
@@ -429,14 +435,14 @@ def test_eviction_policy_on_wildchat(scale: str, eviction_policy: str):
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Requires CUDA for realistic testing"
 )
-def test_compare_eviction_policies_on_wildchat():
+@pytest.mark.parametrize("model,max_model_len,gpu_util", WILDCHAT_MODELS)
+def test_compare_eviction_policies_on_wildchat(
+    model: str, max_model_len: int, gpu_util: float,
+):
     """
     Compare all eviction policies on WildChat conversations.
     """
     from tests.v1.kv_offload.wildchat_loader import get_wildchat_prompts
-
-    model = "facebook/opt-1.3b"
-    max_model_len = 2048
 
     prompts = get_wildchat_prompts(
         scale="small", interleave=True, max_model_len=max_model_len,
@@ -459,7 +465,7 @@ def test_compare_eviction_policies_on_wildchat():
         llm = LLM(
             model=model,
             max_model_len=max_model_len,
-            gpu_memory_utilization=0.4,
+            gpu_memory_utilization=gpu_util,
             kv_transfer_config=kv_transfer_config,
             enable_prefix_caching=True,
         )
@@ -488,7 +494,7 @@ def test_compare_eviction_policies_on_wildchat():
         del llm
 
     print("\n" + "=" * 60)
-    print("EVICTION POLICY COMPARISON - WildChat Real Conversations")
+    print(f"EVICTION POLICY COMPARISON - WildChat ({model})")
     print(f"  {len(prompts)} prompts, batch_size=16")
     print("=" * 60)
     for policy, metrics in results.items():
