@@ -8,6 +8,7 @@ from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
     OffloadingEvent,
     OffloadingManager,
+    OffloadingStats,
     PrepareStoreOutput,
 )
 from vllm.v1.kv_offload.backend import Backend, BlockStatus
@@ -62,14 +63,20 @@ class ARCOffloadingManager(OffloadingManager):
         self.b2: OrderedDict[BlockHash, None] = OrderedDict()
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
         self.cache_capacity: int = self.backend.get_num_free_blocks()
+        self._stats = OffloadingStats()
 
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
         hit_count = 0
+        total = 0
         for block_hash in block_hashes:
+            total += 1
             block = self.t1.get(block_hash) or self.t2.get(block_hash)
             if block is None or not block.is_ready:
                 break
             hit_count += 1
+        self._stats.lookup_count += 1
+        self._stats.hit_blocks += hit_count
+        self._stats.miss_blocks += total - hit_count
         return hit_count
 
     def prepare_load(self, block_hashes: Iterable[BlockHash]) -> LoadStoreSpec:
@@ -201,6 +208,9 @@ class ARCOffloadingManager(OffloadingManager):
             self.b2.pop(block_hash, None)
 
         store_spec = self.backend.get_load_store_spec(block_hashes_to_store, blocks)
+
+        self._stats.eviction_count += len(to_evict)
+        self._stats.store_count += len(block_hashes_to_store)
 
         return PrepareStoreOutput(
             block_hashes_to_store=block_hashes_to_store,

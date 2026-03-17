@@ -29,7 +29,7 @@ The class provides the following primitives:
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
@@ -64,6 +64,21 @@ class OffloadingEvent:
     medium: str
     # True if blocks are removed, False if stored
     removed: bool
+
+
+@dataclass
+class OffloadingStats:
+    """Cumulative cache statistics for an OffloadingManager."""
+    lookup_count: int = 0       # Total lookup() calls
+    hit_blocks: int = 0         # Total blocks found ready
+    miss_blocks: int = 0        # Total blocks not found
+    eviction_count: int = 0     # Total blocks evicted
+    store_count: int = 0        # Total blocks stored
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.hit_blocks + self.miss_blocks
+        return self.hit_blocks / total if total > 0 else 0.0
 
 
 class OffloadingManager(ABC):
@@ -161,3 +176,9 @@ class OffloadingManager(ABC):
             New OffloadingEvents collected since the last call.
         """
         return ()
+
+    def get_stats(self) -> OffloadingStats:
+        """Return cumulative cache statistics."""
+        if not hasattr(self, "_stats"):
+            self._stats = OffloadingStats()
+        return self._stats
