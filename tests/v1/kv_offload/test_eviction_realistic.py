@@ -359,10 +359,17 @@ def test_workload_definitions_are_valid():
         )
 
 
-# (model, max_model_len, gpu_util, cpu_cache_bytes)
+# (model, max_model_len, gpu_util)
 WILDCHAT_MODELS = [
-    pytest.param("facebook/opt-1.3b", 2048, 0.4, 1 << 30, id="opt-1.3b"),
-    pytest.param("Qwen/Qwen3-8B", 16384, 0.9, 8 << 30, id="qwen3-8b"),
+    pytest.param("facebook/opt-1.3b", 2048, 0.4, id="opt-1.3b"),
+    pytest.param("Qwen/Qwen3-8B", 16384, 0.9, id="qwen3-8b"),
+]
+
+# Cache pressure levels: small cache = high eviction pressure
+CACHE_PRESSURE = [
+    pytest.param(1 << 29, id="512MB-high-pressure"),
+    pytest.param(1 << 30, id="1GB-medium-pressure"),
+    pytest.param(4 << 30, id="4GB-low-pressure"),
 ]
 
 
@@ -371,7 +378,8 @@ WILDCHAT_MODELS = [
 )
 @pytest.mark.parametrize("scale", ["small"])
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc", "lfu", "lru-2"])
-@pytest.mark.parametrize("model,max_model_len,gpu_util,cpu_cache_bytes", WILDCHAT_MODELS)
+@pytest.mark.parametrize("model,max_model_len,gpu_util", WILDCHAT_MODELS)
+@pytest.mark.parametrize("cpu_cache_bytes", CACHE_PRESSURE)
 def test_eviction_policy_on_wildchat(
     scale: str, eviction_policy: str, model: str, max_model_len: int,
     gpu_util: float, cpu_cache_bytes: int,
@@ -438,7 +446,8 @@ def test_eviction_policy_on_wildchat(
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Requires CUDA for realistic testing"
 )
-@pytest.mark.parametrize("model,max_model_len,gpu_util,cpu_cache_bytes", WILDCHAT_MODELS)
+@pytest.mark.parametrize("model,max_model_len,gpu_util", WILDCHAT_MODELS)
+@pytest.mark.parametrize("cpu_cache_bytes", CACHE_PRESSURE)
 def test_compare_eviction_policies_on_wildchat(
     model: str, max_model_len: int, gpu_util: float, cpu_cache_bytes: int,
 ):
