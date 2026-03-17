@@ -359,9 +359,10 @@ def test_workload_definitions_are_valid():
         )
 
 
+# (model, max_model_len, gpu_util, cpu_cache_bytes)
 WILDCHAT_MODELS = [
-    pytest.param("facebook/opt-1.3b", 2048, 0.4, id="opt-1.3b"),
-    pytest.param("Qwen/Qwen3-8B", 16384, 0.9, id="qwen3-8b"),
+    pytest.param("facebook/opt-1.3b", 2048, 0.4, 1 << 30, id="opt-1.3b"),
+    pytest.param("Qwen/Qwen3-8B", 16384, 0.9, 8 << 30, id="qwen3-8b"),
 ]
 
 
@@ -370,9 +371,10 @@ WILDCHAT_MODELS = [
 )
 @pytest.mark.parametrize("scale", ["small"])
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc", "lfu", "lru-2"])
-@pytest.mark.parametrize("model,max_model_len,gpu_util", WILDCHAT_MODELS)
+@pytest.mark.parametrize("model,max_model_len,gpu_util,cpu_cache_bytes", WILDCHAT_MODELS)
 def test_eviction_policy_on_wildchat(
-    scale: str, eviction_policy: str, model: str, max_model_len: int, gpu_util: float
+    scale: str, eviction_policy: str, model: str, max_model_len: int,
+    gpu_util: float, cpu_cache_bytes: int,
 ):
     """
     Test eviction policy performance on WildChat real conversations.
@@ -393,7 +395,7 @@ def test_eviction_policy_on_wildchat(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
         kv_connector_extra_config={
-            "cpu_bytes_to_use": 1 << 30,
+            "cpu_bytes_to_use": cpu_cache_bytes,
             "block_size": 16,
             "eviction_policy": eviction_policy,
         },
@@ -426,6 +428,7 @@ def test_eviction_policy_on_wildchat(
     throughput = len(prompts) / (total_time / 1000)  # prompts/sec
 
     print(f"\n{eviction_policy.upper()} on WildChat ({scale}, {model}):")
+    print(f"  CPU cache: {cpu_cache_bytes / (1 << 30):.0f}GB")
     print(f"  Prompts: {len(prompts)}, Batch size: {batch_size}")
     print(f"  Total time: {total_time:.0f}ms")
     print(f"  Avg batch latency: {avg_batch_latency:.2f}ms")
@@ -435,9 +438,9 @@ def test_eviction_policy_on_wildchat(
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Requires CUDA for realistic testing"
 )
-@pytest.mark.parametrize("model,max_model_len,gpu_util", WILDCHAT_MODELS)
+@pytest.mark.parametrize("model,max_model_len,gpu_util,cpu_cache_bytes", WILDCHAT_MODELS)
 def test_compare_eviction_policies_on_wildchat(
-    model: str, max_model_len: int, gpu_util: float,
+    model: str, max_model_len: int, gpu_util: float, cpu_cache_bytes: int,
 ):
     """
     Compare all eviction policies on WildChat conversations.
@@ -456,7 +459,7 @@ def test_compare_eviction_policies_on_wildchat(
             kv_connector="OffloadingConnector",
             kv_role="kv_both",
             kv_connector_extra_config={
-                "cpu_bytes_to_use": 1 << 30,
+                "cpu_bytes_to_use": cpu_cache_bytes,
                 "block_size": 16,
                 "eviction_policy": policy,
             },
