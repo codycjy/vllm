@@ -359,5 +359,136 @@ def test_workload_definitions_are_valid():
         )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Requires CUDA for realistic testing"
+)
+@pytest.mark.parametrize("scale", ["small"])
+@pytest.mark.parametrize("eviction_policy", ["lru", "arc", "lfu", "lru-2"])
+def test_eviction_policy_on_wildchat(scale: str, eviction_policy: str):
+    """
+    Test eviction policy performance on WildChat real conversations.
+
+    Uses multi-turn conversations from allenai/WildChat dataset,
+    expanded into incremental prompt sequences that naturally
+    exhibit prefix sharing patterns. Prompts are submitted in
+    batches to simulate concurrent users.
+    """
+    from tests.v1.kv_offload.wildchat_loader import get_wildchat_prompts
+
+    prompts = get_wildchat_prompts(scale=scale, interleave=True)
+    assert len(prompts) > 0, f"No prompts loaded from WildChat (scale={scale})"
+
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 1 << 30,
+            "block_size": 16,
+            "eviction_policy": eviction_policy,
+        },
+    )
+
+    llm = LLM(
+        model="facebook/opt-125m",
+        gpu_memory_utilization=0.3,
+        kv_transfer_config=kv_transfer_config,
+        enable_prefix_caching=True,
+    )
+
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+
+    import time
+
+    # Submit all prompts as a batch — vLLM schedules them concurrently
+    batch_size = 16
+    batch_latencies = []
+    for i in range(0, len(prompts), batch_size):
+        batch = prompts[i : i + batch_size]
+        start = time.perf_counter()
+        llm.generate(batch, sampling_params, use_tqdm=False)
+        latency = (time.perf_counter() - start) * 1000
+        batch_latencies.append(latency)
+
+    avg_batch_latency = sum(batch_latencies) / len(batch_latencies)
+    total_time = sum(batch_latencies)
+    throughput = len(prompts) / (total_time / 1000)  # prompts/sec
+
+    print(f"\n{eviction_policy.upper()} on WildChat ({scale}):")
+    print(f"  Prompts: {len(prompts)}, Batch size: {batch_size}")
+    print(f"  Total time: {total_time:.0f}ms")
+    print(f"  Avg batch latency: {avg_batch_latency:.2f}ms")
+    print(f"  Throughput: {throughput:.1f} prompts/sec")
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Requires CUDA for realistic testing"
+)
+def test_compare_eviction_policies_on_wildchat():
+    """
+    Compare all eviction policies on WildChat conversations.
+    """
+    from tests.v1.kv_offload.wildchat_loader import get_wildchat_prompts
+
+    prompts = get_wildchat_prompts(scale="small", interleave=True)
+    assert len(prompts) > 0, "No prompts loaded from WildChat"
+
+    results = {}
+
+    for policy in ["lru", "arc", "lfu", "lru-2"]:
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "cpu_bytes_to_use": 1 << 30,
+                "block_size": 16,
+                "eviction_policy": policy,
+            },
+        )
+
+        llm = LLM(
+            model="facebook/opt-125m",
+            gpu_memory_utilization=0.3,
+            kv_transfer_config=kv_transfer_config,
+            enable_prefix_caching=True,
+        )
+
+        sampling_params = SamplingParams(temperature=0, max_tokens=10)
+
+        import time
+
+        batch_size = 16
+        batch_latencies = []
+        for i in range(0, len(prompts), batch_size):
+            batch = prompts[i : i + batch_size]
+            start = time.perf_counter()
+            llm.generate(batch, sampling_params, use_tqdm=False)
+            latency = (time.perf_counter() - start) * 1000
+            batch_latencies.append(latency)
+
+        assert len(batch_latencies) > 0, f"No latencies recorded for {policy}"
+        total_time = sum(batch_latencies)
+        throughput = len(prompts) / (total_time / 1000)
+
+        results[policy] = {
+            "total_time_ms": total_time,
+            "throughput": throughput,
+        }
+        del llm
+
+    print("\n" + "=" * 60)
+    print("EVICTION POLICY COMPARISON - WildChat Real Conversations")
+    print(f"  {len(prompts)} prompts, batch_size=16")
+    print("=" * 60)
+    for policy, metrics in results.items():
+        print(
+            f"{policy.upper():6s}: Total={metrics['total_time_ms']:.0f}ms, "
+            f"Throughput={metrics['throughput']:.1f} prompts/sec"
+        )
+    print("=" * 60)
+
+    best = max(results.items(), key=lambda x: x[1]["throughput"])
+    print(f"\nBest Throughput: {best[0].upper()} ({best[1]['throughput']:.1f} prompts/sec)")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
