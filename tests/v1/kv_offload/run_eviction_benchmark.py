@@ -46,8 +46,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from tests.v1.kv_offload.workloads import (
     WORKLOADS,
-    load_workload_from_file,
-    prepare_prompts_from_workload,
+    load_prompts,
 )
 
 ALL_POLICIES = ["lru", "arc", "lfu", "lru-2"]
@@ -62,36 +61,9 @@ def parse_human_bytes(s: str) -> int:
     return int(s)
 
 
-def _load_prompts(args) -> list[str]:
-    """Load prompts based on workload argument."""
-    workload_name = args.workload
-
-    if workload_name == "wildchat":
-        from tests.v1.kv_offload.wildchat_loader import get_wildchat_prompts
-
-        prompts = get_wildchat_prompts(
-            scale=args.wildchat_scale,
-            interleave=True,
-            max_model_len=args.max_model_len,
-        )
-    elif workload_name in WORKLOADS:
-        workload = WORKLOADS[workload_name]
-        prompts = prepare_prompts_from_workload(workload)
-    else:
-        # Treat as path to custom JSON workload file
-        workload = load_workload_from_file(workload_name)
-        prompts = prepare_prompts_from_workload(workload)
-
-    if not prompts:
-        raise ValueError(
-            f"No prompts generated from workload '{workload_name}'"
-        )
-    return prompts
-
-
 def run_single_policy(args, policy: str, prompts: list[str]) -> dict:
     """Run benchmark for a single eviction policy. Returns metrics dict."""
-    cpu_cache_bytes = parse_human_bytes(args.cpu_cache_bytes)
+    cpu_cache_bytes = parse_human_bytes(args.kv_cache_size)
 
     kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
@@ -198,7 +170,12 @@ def _print_comparison_table(results: list[dict]) -> None:
 
 
 def main(args) -> None:
-    prompts = _load_prompts(args)
+    prompts = load_prompts(
+        workload_name=args.workload,
+        wildchat_scale=args.wildchat_scale,
+        max_model_len=args.max_model_len,
+        seed=args.seed,
+    )
     policies = ALL_POLICIES if args.compare else args.eviction_policy
 
     print(f"Workload: {args.workload} ({len(prompts)} prompts)")
@@ -258,10 +235,10 @@ def invoke_main() -> None:
         help="GPU memory utilization fraction.",
     )
     parser.add_argument(
-        "--cpu-cache-bytes",
+        "--kv-cache-size",
         type=str,
         default="1G",
-        help="CPU cache size (e.g. 512M, 1G, 4G).",
+        help="CPU KV cache size (e.g. 512M, 1G, 4G).",
     )
     parser.add_argument(
         "--batch-size",
@@ -281,6 +258,12 @@ def invoke_main() -> None:
         default="small",
         choices=["small", "medium", "large"],
         help="Scale for WildChat workload.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for WildChat sampling.",
     )
     parser.add_argument(
         "--output",

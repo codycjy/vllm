@@ -132,6 +132,48 @@ def load_workload_from_file(file_path: str) -> dict:
         return json.load(f)
 
 
+def load_prompts(
+    workload_name: str,
+    wildchat_scale: str = "small",
+    max_model_len: int = 0,
+    seed: int = 42,
+) -> list[str]:
+    """Load prompts based on workload name.
+
+    Args:
+        workload_name: A key in WORKLOADS, ``"wildchat"``, or a path to a
+            custom JSON workload file.
+        wildchat_scale: Scale for WildChat workload (small/medium/large).
+        max_model_len: Model's max context length (used for WildChat truncation).
+        seed: Random seed for WildChat sampling.
+
+    Returns:
+        List of prompt strings ready for benchmarking.
+    """
+    if workload_name == "wildchat":
+        from tests.v1.kv_offload.wildchat_loader import get_wildchat_prompts
+
+        prompts = get_wildchat_prompts(
+            scale=wildchat_scale,
+            interleave=True,
+            max_model_len=max_model_len,
+            seed=seed,
+        )
+    elif workload_name in WORKLOADS:
+        workload = WORKLOADS[workload_name]
+        prompts = prepare_prompts_from_workload(workload)
+    else:
+        # Treat as path to custom JSON workload file
+        workload = load_workload_from_file(workload_name)
+        prompts = prepare_prompts_from_workload(workload)
+
+    if not prompts:
+        raise ValueError(
+            f"No prompts generated from workload '{workload_name}'"
+        )
+    return prompts
+
+
 def prepare_prompts_from_workload(workload: dict) -> list[str]:
     """Convert workload definition to list of full prompts."""
     prompts = []
