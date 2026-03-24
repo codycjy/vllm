@@ -114,23 +114,29 @@ def run_single_policy(args, policy: str, prompts: list[str]) -> dict:
     sampling_params = SamplingParams(temperature=0, max_tokens=args.max_tokens)
 
     batch_size = args.batch_size
-    batch_latencies = []
+    # Each entry: (batch_len, latency_ms)
+    batch_records: list[tuple[int, float]] = []
 
     for i in range(0, len(prompts), batch_size):
         batch = prompts[i : i + batch_size]
         start = time.perf_counter()
         llm.generate(batch, sampling_params, use_tqdm=False)
         latency = (time.perf_counter() - start) * 1000  # ms
-        batch_latencies.append(latency)
+        batch_records.append((len(batch), latency))
 
-    total_time_ms = sum(batch_latencies)
-    avg_batch_latency_ms = total_time_ms / len(batch_latencies)
+    total_time_ms = sum(lat for _, lat in batch_records)
+    avg_prompt_latency_ms = total_time_ms / len(prompts)
     throughput = len(prompts) / (total_time_ms / 1000)  # prompts/sec
-    speedup = (
-        batch_latencies[0] / batch_latencies[-1]
-        if batch_latencies[-1] > 0
-        else 1.0
-    )
+
+    # Speedup: per-prompt latency of first full batch vs last full batch.
+    # Only compare batches of the same (full) size to be fair.
+    full_batches = [(sz, lat) for sz, lat in batch_records if sz == batch_size]
+    if len(full_batches) >= 2:
+        first_per_prompt = full_batches[0][1] / full_batches[0][0]
+        last_per_prompt = full_batches[-1][1] / full_batches[-1][0]
+        speedup = first_per_prompt / last_per_prompt if last_per_prompt > 0 else 1.0
+    else:
+        speedup = 1.0
 
     del llm  # free GPU memory
 
@@ -140,12 +146,11 @@ def run_single_policy(args, policy: str, prompts: list[str]) -> dict:
         "model": args.model,
         "num_prompts": len(prompts),
         "batch_size": batch_size,
+        "num_batches": len(batch_records),
         "cpu_cache_bytes": cpu_cache_bytes,
         "total_time_ms": round(total_time_ms, 2),
-        "avg_batch_latency_ms": round(avg_batch_latency_ms, 2),
+        "avg_prompt_latency_ms": round(avg_prompt_latency_ms, 2),
         "throughput_prompts_per_sec": round(throughput, 2),
-        "first_batch_ms": round(batch_latencies[0], 2),
-        "last_batch_ms": round(batch_latencies[-1], 2),
         "speedup": round(speedup, 2),
     }
 
@@ -154,14 +159,13 @@ def _print_result(result: dict) -> None:
     """Print a single policy result."""
     print(f"\n{result['policy'].upper()} on {result['workload']}:")
     print(f"  Model: {result['model']}")
-    print(f"  Prompts: {result['num_prompts']}, Batch size: {result['batch_size']}")
+    print(f"  Prompts: {result['num_prompts']}, "
+          f"Batches: {result['num_batches']} x {result['batch_size']}")
     print(f"  CPU cache: {result['cpu_cache_bytes'] / (1 << 30):.1f}GB")
     print(f"  Total time: {result['total_time_ms']:.0f}ms")
-    print(f"  Avg batch latency: {result['avg_batch_latency_ms']:.2f}ms")
+    print(f"  Avg per-prompt latency: {result['avg_prompt_latency_ms']:.2f}ms")
     print(f"  Throughput: {result['throughput_prompts_per_sec']:.1f} prompts/sec")
-    print(f"  First batch: {result['first_batch_ms']:.2f}ms")
-    print(f"  Last batch: {result['last_batch_ms']:.2f}ms")
-    print(f"  Speedup: {result['speedup']:.2f}x")
+    print(f"  Speedup (first vs last full batch): {result['speedup']:.2f}x")
 
 
 def _print_comparison_table(results: list[dict]) -> None:
@@ -172,14 +176,14 @@ def _print_comparison_table(results: list[dict]) -> None:
     print(f"  Prompts: {results[0]['num_prompts']}, "
           f"Batch size: {results[0]['batch_size']}")
     print("=" * 70)
-    print(f"{'Policy':>8s}  {'Total(ms)':>10s}  {'AvgBatch(ms)':>12s}  "
+    print(f"{'Policy':>8s}  {'Total(ms)':>10s}  {'Avg/prompt(ms)':>14s}  "
           f"{'Throughput':>12s}  {'Speedup':>8s}")
     print("-" * 70)
     for r in results:
         print(
             f"{r['policy'].upper():>8s}  "
             f"{r['total_time_ms']:>10.0f}  "
-            f"{r['avg_batch_latency_ms']:>12.2f}  "
+            f"{r['avg_prompt_latency_ms']:>14.2f}  "
             f"{r['throughput_prompts_per_sec']:>10.1f} p/s  "
             f"{r['speedup']:>7.2f}x"
         )
