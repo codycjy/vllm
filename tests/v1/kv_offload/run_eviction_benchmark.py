@@ -70,7 +70,7 @@ def run_single_policy(args, policy: str, prompts: list[str]) -> dict:
         kv_role="kv_both",
         kv_connector_extra_config={
             "cpu_bytes_to_use": cpu_cache_bytes,
-            "block_size": 16,
+            "block_size": args.block_size,
             "eviction_policy": policy,
         },
     )
@@ -239,6 +239,12 @@ def invoke_main() -> None:
         type=str,
         default="1G",
         help="CPU KV cache size (e.g. 512M, 1G, 4G).",
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=16,
+        help="KV cache block size (default: 16).",
     )
     parser.add_argument(
         "--batch-size",
