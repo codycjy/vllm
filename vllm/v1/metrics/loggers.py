@@ -235,14 +235,20 @@ class LoggingStatLogger(StatLoggerBase):
             [
                 "GPU KV cache usage: %.1f%%",
                 "Prefix cache hit rate: %.1f%%",
+                "Prefix cache util: %.1f%%",
             ]
         )
         log_args.extend(
             [
                 self.last_scheduler_stats.kv_cache_usage * 100,
                 self.prefix_caching_metrics.hit_rate * 100,
+                self.last_scheduler_stats.prefix_cache_utilization * 100,
             ]
         )
+
+        if self.last_scheduler_stats.num_evictions > 0:
+            log_parts.append("Evictions: %d")
+            log_args.append(self.last_scheduler_stats.num_evictions)
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             log_parts.append("Corrupted: %d reqs")
@@ -480,6 +486,25 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.gauge_kv_cache_usage = make_per_engine(
             gauge_kv_cache_usage, engine_indexes, model_name
+        )
+
+        counter_kv_cache_evictions = self._counter_cls(
+            name="vllm:kv_cache_evictions_total",
+            documentation="Total number of prefix cache block evictions.",
+            labelnames=labelnames,
+        )
+        self.counter_kv_cache_evictions = make_per_engine(
+            counter_kv_cache_evictions, engine_indexes, model_name
+        )
+
+        gauge_prefix_cache_utilization = self._gauge_cls(
+            name="vllm:prefix_cache_utilization",
+            documentation="Fraction of blocks holding cached prefix data.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_prefix_cache_utilization = make_per_engine(
+            gauge_prefix_cache_utilization, engine_indexes, model_name
         )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1002,6 +1027,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+
+            if scheduler_stats.num_evictions > 0:
+                self.counter_kv_cache_evictions[engine_idx].inc(
+                    scheduler_stats.num_evictions)
+            self.gauge_prefix_cache_utilization[engine_idx].set(
+                scheduler_stats.prefix_cache_utilization)
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
