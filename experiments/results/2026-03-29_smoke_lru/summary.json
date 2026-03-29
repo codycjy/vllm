@@ -1,0 +1,22 @@
+{
+  "tag": "lru",
+  "num_requests": 20,
+  "num_unique_prefixes": 5,
+  "repeats_per_prefix": 4,
+  "avg_first_request_latency_ms": 814.3,
+  "avg_repeat_request_latency_ms": 406.6,
+  "speedup_ratio": 2.0,
+  "prefix_cache_queries": 18640.0,
+  "prefix_cache_hits": 13680.0,
+  "prefix_cache_hit_rate": 0.7339,
+  "evictions": 0,
+  "prefix_cache_utilization": 0,
+  "kv_cache_usage": 0.0,
+  "checks": {
+    "All requests completed": true,
+    "Cache queries > 0": true,
+    "Cache hit rate > 0": true,
+    "Repeat requests faster than first": true
+  },
+  "all_checks_passed": true
+}
