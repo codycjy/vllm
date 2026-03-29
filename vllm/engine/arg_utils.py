@@ -59,6 +59,7 @@ from vllm.config import (
 from vllm.config.cache import (
     BlockSize,
     CacheDType,
+    EvictionPolicy,
     KVOffloadingBackend,
     MambaCacheMode,
     MambaDType,
@@ -425,6 +426,7 @@ class EngineArgs:
     )
     block_size: BlockSize | None = CacheConfig.block_size
     enable_prefix_caching: bool | None = None
+    eviction_policy: EvictionPolicy = CacheConfig.eviction_policy
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
@@ -923,6 +925,9 @@ class EngineArgs:
             },
         )
         cache_group.add_argument(
+            "--eviction-policy", **cache_kwargs["eviction_policy"]
+        )
+        cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
         )
         cache_group.add_argument("--cpu-offload-gb", **cache_kwargs["cpu_offload_gb"])
@@ -1414,6 +1419,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
+            eviction_policy=self.eviction_policy,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,

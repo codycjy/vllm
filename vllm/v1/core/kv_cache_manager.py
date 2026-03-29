@@ -98,6 +98,7 @@ class KVCacheManager:
         max_model_len: int,
         hash_block_size: int,
         enable_caching: bool = True,
+        eviction_policy: str = "lru",
         use_eagle: bool = False,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
@@ -121,6 +122,7 @@ class KVCacheManager:
             max_model_len=self.max_model_len,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
+            eviction_policy=eviction_policy,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
@@ -148,6 +150,13 @@ class KVCacheManager:
             The KV cache usage (between 0.0 and 1.0).
         """
         return self.block_pool.get_usage()
+
+    @property
+    def prefix_cache_utilization(self) -> float:
+        return self.block_pool.get_prefix_cache_utilization()
+
+    def drain_num_evictions(self) -> int:
+        return self.block_pool.drain_num_evictions()
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.

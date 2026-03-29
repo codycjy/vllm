@@ -175,8 +175,14 @@ class FreeKVCacheBlockQueue:
         blocks: A list of KVCacheBlock objects.
     """
 
-    def __init__(self, blocks: list[KVCacheBlock]) -> None:
+    def __init__(
+        self,
+        blocks: list[KVCacheBlock],
+        eviction_policy: str = "lru",
+    ) -> None:
         self.num_free_blocks = len(blocks)
+        self.eviction_policy = eviction_policy
+        self.reuse_counter: dict[BlockHashWithGroupId, int] = {}
 
         # Initialize doubly links of consecutive blocks
         for i in range(self.num_free_blocks):
@@ -206,10 +212,10 @@ class FreeKVCacheBlockQueue:
             self.fake_free_list_tail.prev_free_block = self.fake_free_list_head
 
     def popleft(self) -> KVCacheBlock:
-        """Pop the first free block and reduce num_free_blocks by 1.
+        """Pop the best eviction candidate and reduce num_free_blocks by 1.
 
-        Returns:
-            The first free block.
+        When eviction_policy is "lru", pops the front of the queue.
+        When eviction_policy is "adaptive", scans for the lowest reuse count.
         """
         if (
             self.fake_free_list_head.next_free_block is self.fake_free_list_tail
@@ -221,56 +227,76 @@ class FreeKVCacheBlockQueue:
             )
             raise ValueError("No free blocks available")
 
-        first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
+        if self.eviction_policy == "adaptive":
+            return self._popleft_adaptive()
+        return self._popleft_lru()
+
+    def _popleft_lru(self) -> KVCacheBlock:
+        """Original LRU eviction: pop the front of the queue."""
+        first_block: KVCacheBlock = self.fake_free_list_head.next_free_block  # type: ignore
 
         if first_block.next_free_block is None:
-            # This should not happen if the block is from the free list.
-            # It indicates a bug in the caller's logic.
             raise RuntimeError(
                 "Invalid block found in popleft() "
                 "which doesn't have a valid next_free_block"
             )
 
-        # Connect fake_head and the next block of first_block (i.e. second block
-        # or fake tail).
         self.fake_free_list_head.next_free_block = first_block.next_free_block
         first_block.next_free_block.prev_free_block = self.fake_free_list_head
-
-        # Remove the block from the linked list.
         first_block.prev_free_block = first_block.next_free_block = None
-
         self.num_free_blocks -= 1
         return first_block
 
+    def _popleft_adaptive(self) -> KVCacheBlock:
+        """Adaptive eviction: select the block with the lowest reuse count.
+        Blocks without cached data are preferred (zero-cost eviction)."""
+        best_victim: KVCacheBlock | None = None
+        best_score: int = 2**63
+
+        curr = self.fake_free_list_head.next_free_block
+        while curr is not None and curr is not self.fake_free_list_tail:
+            block_hash = curr._block_hash
+            if block_hash is None:
+                best_victim = curr
+                break
+            score = self.reuse_counter.get(block_hash, 0)
+            if score < best_score:
+                best_score = score
+                best_victim = curr
+            curr = curr.next_free_block
+
+        if best_victim is None:
+            raise ValueError("No free blocks available")
+
+        self.remove(best_victim)
+        return best_victim
+
     def popleft_n(self, n: int) -> list[KVCacheBlock]:
-        """Pop the first n free blocks and reduce num_free_blocks by n.
+        """Pop n eviction candidates.
 
-        Args:
-            n: The number of blocks to pop.
-
-        Returns:
-            A list of n free blocks.
+        For LRU, pops from the front (batch-optimized).
+        For adaptive, calls popleft() n times.
         """
         if n == 0:
             return []
         assert self.num_free_blocks >= n
-        self.num_free_blocks -= n
 
+        if self.eviction_policy == "adaptive":
+            return [self.popleft() for _ in range(n)]
+
+        # LRU fast path
+        self.num_free_blocks -= n
         curr_block = self.fake_free_list_head.next_free_block
-        # Pop n blocks from the head of the list
         ret = []
         for _ in range(n):
             assert curr_block is not None
             ret.append(curr_block)
             last_block = curr_block
             curr_block = curr_block.next_free_block
-            # Reset prev_free_block and next_free_block of all popped blocks
             last_block.prev_free_block = None
             last_block.next_free_block = None
 
         if curr_block is not None:
-            # The queue is not empty, connect the fake head to
-            # the new first block.
             self.fake_free_list_head.next_free_block = curr_block
             curr_block.prev_free_block = self.fake_free_list_head
         return ret
@@ -342,6 +368,18 @@ class FreeKVCacheBlockQueue:
         self.fake_free_list_tail.prev_free_block = last_block
 
         self.num_free_blocks += len(blocks)
+
+    def increment_reuse(self, block: KVCacheBlock) -> None:
+        """Increment the reuse counter for a block's hash.
+        Only has effect when eviction_policy is "adaptive".
+        """
+        if self.eviction_policy != "adaptive":
+            return
+        block_hash = block._block_hash
+        if block_hash is not None:
+            self.reuse_counter[block_hash] = (
+                self.reuse_counter.get(block_hash, 0) + 1
+            )
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.

@@ -34,6 +34,7 @@ MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
+EvictionPolicy = Literal["lru", "adaptive"]
 
 
 @config
@@ -77,6 +78,13 @@ class CacheConfig:
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
+    eviction_policy: EvictionPolicy = "lru"
+    """Eviction policy for prefix cache blocks:\n
+    - "lru" (default): Least Recently Used — evicts the block that was accessed
+    the longest time ago. This is vLLM's original behavior.\n
+    - "adaptive": Workload-aware eviction based on online reuse counting —
+    evicts the block with the lowest reuse frequency. Only effective when
+    prefix caching is enabled."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
     - "sha256" uses Pickle for object serialization before hashing. This is the
@@ -189,6 +197,7 @@ class CacheConfig:
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
+            "eviction_policy",
             "prefix_caching_hash_algo",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",

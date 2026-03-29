@@ -159,6 +159,7 @@ class KVCacheEvictionEvent:
     lifetime_seconds: float
     idle_seconds: float
     reuse_gaps_seconds: tuple[float, ...]
+    reuse_count: int = 0
 
 
 @dataclass
@@ -178,6 +179,9 @@ class SchedulerStats:
     connector_prefix_cache_stats: PrefixCacheStats | None = None
 
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
+
+    num_evictions: int = 0
+    prefix_cache_utilization: float = 0.0
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None

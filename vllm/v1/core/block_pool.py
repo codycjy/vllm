@@ -151,10 +151,12 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        eviction_policy: str = "lru",
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
+        self.eviction_policy = eviction_policy
         self.hash_block_size = hash_block_size
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
@@ -163,7 +165,8 @@ class BlockPool:
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
-        self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+        self.free_block_queue = FreeKVCacheBlockQueue(
+            self.blocks, eviction_policy=eviction_policy)
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
@@ -178,6 +181,7 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+        self._num_evictions: int = 0
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -340,11 +344,17 @@ class BlockPool:
         Returns:
             True if the block is evicted, False otherwise.
         """
+        # Capture reuse_count before eviction (for adaptive policy metrics).
+        reuse_count = 0
+        block_hash = block.block_hash
+        if block_hash is not None:
+            reuse_count = self.free_block_queue.reuse_counter.get(
+                block_hash, 0)
+
         # Clean up metrics tracking first to prevent leaks
         if self.metrics_collector:
-            self.metrics_collector.on_block_evicted(block)
+            self.metrics_collector.on_block_evicted(block, reuse_count)
 
-        block_hash = block.block_hash
         if block_hash is None:
             # The block doesn't have hash, eviction is not needed
             return False
@@ -354,6 +364,7 @@ class BlockPool:
             # eviction is not needed
             return False
 
+        self._num_evictions += 1
         block.reset_hash()
 
         if self.enable_kv_cache_events:
@@ -383,6 +394,7 @@ class BlockPool:
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
+            self.free_block_queue.increment_reuse(block)
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
@@ -476,6 +488,19 @@ class BlockPool:
         if not total_gpu_blocks:
             return 0
         return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)
+
+    def get_prefix_cache_utilization(self) -> float:
+        """Fraction of total blocks that hold cached prefix data."""
+        total_gpu_blocks = self.num_gpu_blocks - 1
+        if not total_gpu_blocks:
+            return 0.0
+        return len(self.cached_block_hash_to_block) / total_gpu_blocks
+
+    def drain_num_evictions(self) -> int:
+        """Return and reset the eviction counter since last drain."""
+        count = self._num_evictions
+        self._num_evictions = 0
+        return count
 
     def take_events(self) -> list[KVCacheEvent]:
         """Atomically takes all events and clears the queue.

@@ -68,7 +68,9 @@ class KVCacheMetricsCollector:
         if metrics:
             metrics.record_access()
 
-    def on_block_evicted(self, block: "KVCacheBlock") -> None:
+    def on_block_evicted(
+        self, block: "KVCacheBlock", reuse_count: int = 0
+    ) -> None:
         metrics = self.block_metrics.pop(block.block_id, None)
         if not metrics:
             return
@@ -82,6 +84,7 @@ class KVCacheMetricsCollector:
                 lifetime_seconds=lifetime,
                 idle_seconds=idle_time,
                 reuse_gaps_seconds=reuse_gaps,
+                reuse_count=reuse_count,
             )
         )
 
