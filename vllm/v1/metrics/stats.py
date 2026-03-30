@@ -183,6 +183,10 @@ class SchedulerStats:
     num_evictions: int = 0
     prefix_cache_utilization: float = 0.0
 
+    # Scheduling fairness metrics (prefix_match policy)
+    max_wait_time: float = 0.0
+    num_starved_requests: int = 0
+
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
 

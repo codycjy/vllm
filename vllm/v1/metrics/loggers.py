@@ -250,6 +250,13 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("Evictions: %d")
             log_args.append(self.last_scheduler_stats.num_evictions)
 
+        if self.last_scheduler_stats.max_wait_time > 0:
+            log_parts.append("Max wait: %.1fs")
+            log_args.append(self.last_scheduler_stats.max_wait_time)
+        if self.last_scheduler_stats.num_starved_requests > 0:
+            log_parts.append("Starved: %d")
+            log_args.append(self.last_scheduler_stats.num_starved_requests)
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             log_parts.append("Corrupted: %d reqs")
             log_args.append(self.num_corrupted_reqs)
@@ -505,6 +512,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.gauge_prefix_cache_utilization = make_per_engine(
             gauge_prefix_cache_utilization, engine_indexes, model_name
+        )
+
+        gauge_scheduler_max_wait = self._gauge_cls(
+            name="vllm:scheduler_max_wait_seconds",
+            documentation="Maximum wait time in seconds among waiting requests.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_scheduler_max_wait = make_per_engine(
+            gauge_scheduler_max_wait, engine_indexes, model_name
+        )
+
+        gauge_scheduler_starved = self._gauge_cls(
+            name="vllm:scheduler_starved_requests",
+            documentation="Number of requests exceeding max wait threshold.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_scheduler_starved = make_per_engine(
+            gauge_scheduler_starved, engine_indexes, model_name
         )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1033,6 +1060,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.num_evictions)
             self.gauge_prefix_cache_utilization[engine_idx].set(
                 scheduler_stats.prefix_cache_utilization)
+
+            self.gauge_scheduler_max_wait[engine_idx].set(
+                scheduler_stats.max_wait_time)
+            self.gauge_scheduler_starved[engine_idx].set(
+                scheduler_stats.num_starved_requests)
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries

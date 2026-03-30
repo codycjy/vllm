@@ -227,6 +227,15 @@ class Scheduler(SchedulerInterface):
             hash_block_size=self.block_size,
             metrics_collector=self.kv_metrics_collector,
         )
+        # For prefix_match policy, recreate the waiting queue now that
+        # kv_cache_manager is available (it was not yet created at line 158).
+        if self.policy == SchedulingPolicy.PREFIX_MATCH:
+            self.waiting = create_request_queue(
+                self.policy,
+                kv_cache_manager=self.kv_cache_manager,
+                max_wait_seconds=self.scheduler_config.scheduling_max_wait,
+            )
+
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
@@ -531,8 +540,11 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Use a temporary RequestQueue to collect requests that need to be
-        # skipped and put back at the head of the waiting queue later
-        skipped_waiting_requests = create_request_queue(self.policy)
+        # skipped and put back at the head of the waiting queue later.
+        # Always use FCFS for the temp queue — it's just a collector;
+        # requests will be re-sorted when prepended back to self.waiting.
+        skipped_waiting_requests = create_request_queue(
+            SchedulingPolicy.FCFS)
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -1789,6 +1801,20 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
+
+        # Compute scheduling fairness metrics.
+        max_wait_time = 0.0
+        num_starved = 0
+        if self.waiting:
+            now = time.monotonic()
+            max_wait_threshold = self.scheduler_config.scheduling_max_wait
+            for req in self.waiting:
+                wait = now - req.arrival_time
+                if wait > max_wait_time:
+                    max_wait_time = wait
+                if wait > max_wait_threshold:
+                    num_starved += 1
+
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
@@ -1799,6 +1825,8 @@ class Scheduler(SchedulerInterface):
             num_evictions=self.kv_cache_manager.drain_num_evictions(),
             prefix_cache_utilization=(
                 self.kv_cache_manager.prefix_cache_utilization),
+            max_wait_time=max_wait_time,
+            num_starved_requests=num_starved,
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,

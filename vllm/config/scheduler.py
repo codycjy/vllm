@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
-SchedulerPolicy = Literal["fcfs", "priority"]
+SchedulerPolicy = Literal["fcfs", "priority", "prefix_match"]
 
 
 @config
@@ -105,7 +105,15 @@ class SchedulerConfig:
     - "fcfs" means first come first served, i.e. requests are handled in order
     of arrival.\n
     - "priority" means requests are handled based on given priority (lower
-    value means earlier handling) and time of arrival deciding any ties)."""
+    value means earlier handling) and time of arrival deciding any ties).\n
+    - "prefix_match" means requests with higher prefix cache hit ratio are
+    scheduled first, with aging to prevent starvation."""
+
+    scheduling_max_wait: float = 30.0
+    """Maximum wait time (seconds) before a request receives aging priority
+    boost in prefix_match scheduling policy. After this threshold, a request
+    gains +0.1 priority per additional second to prevent starvation.
+    Only effective when --scheduling-policy=prefix_match."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
