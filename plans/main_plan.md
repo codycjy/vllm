@@ -40,7 +40,7 @@
 | 组件 | 状态 | 负责 |
 |------|------|------|
 | **缓存感知调度器** | ❌ | prefix-match 请求重排 + aging 公平性机制 |
-| **数据集准备** | ❌ | ShareGPT、WildChat、MMLU、合成数据 |
+| **数据集准备** | ✅ | ShareGPT 92K、MMLU 14K、Burst/Code/RAG 各 500（详见 `plans/01_data_preparation.md`） |
 | **高压驱逐验证** | ❌ | 设计大量唯一前缀的 benchmark，使 cache 填满并触发驱逐，验证 Adaptive 与 LRU 的差异 |
 | **联合优化实验** | ❌ | 完整实验矩阵运行与分析 |
 
