@@ -19,7 +19,7 @@
 
 ---
 
-## 2. 当前进度概览（截至 03/29）
+## 2. 当前进度概览（截至 03/30）
 
 ### 2.1 已完成
 
@@ -33,16 +33,19 @@
 | **观测系统** | ✅ | 新增驱逐计数器、被驱逐 block reuse_count、prefix cache 利用率；Prometheus 暴露；per-request 收集脚本 + 可视化脚本 |
 | **模型准备** | ✅ | `Qwen3-8B`（16GB）+ `opt-1.3b`（7.4GB）已下载至 `opensource/models/` |
 | **v0.15.1 版本对齐** | ✅ | 代码回退到 `v0.15.1` 以匹配 Singularity 容器环境；新分支 `feat/adaptive-eviction-v0.15.1` |
-| **GPU Smoke Test** | ✅ | opt-1.3b + V100 端到端验证通过。LRU/Adaptive 两种策略均通过 4 项检查（请求完成、cache 查询 > 0、命中率 > 0、重复请求更快）。Prometheus 新增指标（evictions、utilization）正常暴露。结果见 `experiments/results/2026-03-29_smoke_*/` |
+| **GPU Smoke Test（驱逐）** | ✅ | opt-1.3b + V100 端到端验证通过。LRU/Adaptive 两种策略均通过 4 项检查。结果见 `experiments/results/2026-03-29_smoke_*/` |
+| **数据集准备** | ✅ | ShareGPT 92K、MMLU 14K、Burst/Code/RAG 各 500（详见 `plans/01_data_preparation.md`） |
+| **缓存感知调度器** | ✅ | `--scheduling-policy prefix_match` + `--scheduling-max-wait`。PrefixMatchRequestQueue 按 cache 命中率排序 + aging 防饥饿。18 项单元测试通过。GPU 端到端验证通过（03/30） |
 
 ### 2.2 未开始
 
 | 组件 | 状态 | 负责 |
 |------|------|------|
-| **缓存感知调度器** | ❌ | prefix-match 请求重排 + aging 公平性机制 |
-| **数据集准备** | ✅ | ShareGPT 92K、MMLU 14K、Burst/Code/RAG 各 500（详见 `plans/01_data_preparation.md`） |
-| **高压驱逐验证** | ❌ | 设计大量唯一前缀的 benchmark，使 cache 填满并触发驱逐，验证 Adaptive 与 LRU 的差异 |
+| **高压驱逐验证** | ❌ | 设计高压 benchmark 触发驱逐，验证 Adaptive 与 LRU 的差异 |
+| **自动化实验脚本** | ❌ | `scripts/run_experiment_matrix.py` 自动化 4×3×3 矩阵 |
 | **联合优化实验** | ❌ | 完整实验矩阵运行与分析 |
+| **分析与可视化** | ❌ | 结果对比图表生成 |
+| **报告与展示** | ❌ | 论文 + 幻灯片 + demo |
 
 > **备注**：之前在 `vllm/v1/kv_offload/` 路径上的 LFU/LRU-K/ARC 实现属于 CPU offloading 场景（GPU block 被驱逐后拷贝到 CPU 内存），与本项目目标（GPU 端 prefix cache 驱逐策略优化）不在同一代码路径上，不纳入本项目范围。
 
@@ -385,10 +388,12 @@ V100 上每次 ~10 分钟 → **~18 GPU 小时**（核心矩阵）。
 
 **任务清单：**
 
-- [ ] 实现 `PrefixMatchRequestQueue`（按 prefix cache 命中长度降序）
-- [ ] 添加 aging 机制（max-wait 阈值防止饥饿）
-- [ ] 接入 `SchedulingPolicy` 枚举，通过配置选择调度策略
-- [ ] 单元测试：验证高 prefix 命中请求优先调度 + 长等待请求不被饿死
+- [x] 实现 `PrefixMatchRequestQueue`（按 prefix cache 命中率排序 + aging 防饥饿）
+- [x] 添加 aging 机制（`--scheduling-max-wait` 阈值防止饥饿）
+- [x] 接入 `SchedulingPolicy` 枚举 + `--scheduling-policy prefix_match` CLI 参数
+- [x] 新增 Prometheus `vllm:scheduler_max_wait_seconds` / `vllm:scheduler_starved_requests`
+- [x] 单元测试：18 项通过（排序、aging、降级 FCFS、队列操作、工厂函数、配置）
+- [x] GPU 端到端验证：opt-1.3b + V100 + prefix_match + adaptive 正常工作（03/30）
 
 ### 阶段 4：联合评估（04/08–04/19）
 
