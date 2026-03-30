@@ -155,7 +155,12 @@ class Scheduler(SchedulerInterface):
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
         # Priority queues for requests.
-        self.waiting = create_request_queue(self.policy)
+        # For PREFIX_MATCH, use FCFS temporarily until kv_cache_manager is
+        # ready (it will be replaced after kv_cache_manager init below).
+        if self.policy == SchedulingPolicy.PREFIX_MATCH:
+            self.waiting = create_request_queue(SchedulingPolicy.FCFS)
+        else:
+            self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
