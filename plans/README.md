@@ -10,8 +10,9 @@
 
 | # | 子计划 | 状态 | 说明 |
 |---|--------|------|------|
+| 0 | [自适应驱逐 + 观测系统](00_adaptive_eviction_and_observability.md) | ✅ 完成 | GPU 端自适应驱逐策略 + Prometheus/日志观测系统 + Smoke Test |
 | 1 | [数据准备](01_data_preparation.md) | ✅ 完成 | 5 个数据集就绪（ShareGPT/MMLU/Burst/Code/RAG） |
-| 2 | 缓存感知调度器 | 未开始 | PrefixMatchRequestQueue + aging 机制 |
+| 2 | [缓存感知调度器](02_cache_aware_scheduler.md) | 未开始 | PrefixMatchRequestQueue + aging 公平性机制 |
 | 3 | 实验执行 | 未开始 | 自动化运行脚本 + 完整矩阵 |
 | 4 | 分析与可视化 | 未开始 | 结果分析 + 图表生成 |
 | 5 | 报告与展示 | 未开始 | 论文 + 幻灯片 + demo |
