@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 """Generate synthetic prompt-length bucket datasets for the prompt length ablation.
 
-Each bucket produces a ShareGPT-compatible JSON file with:
-  - 20 unique prompts sharing a common long prefix (simulating system prompt reuse)
-  - Each prompt repeated 10 times (interleaved) = 200 total entries
-  - Prefix length scaled to hit the target token range
+Two popularity distributions:
+  - "uniform" (v1): 20 unique prompts × 10 repeats each = 200 requests.
+      Every prompt is equally popular. Eviction's reuse_count signal is flat;
+      prefix_match scheduling has no cache-hit discrimination across requests.
+      Useful as a control / methodology comparison.
+  - "skewed" (v2, default): 4 hot × 30 + 16 cold × 5 = 200 requests.
+      Mirrors proposal §4.1 "distinguish high-reuse prefixes from one-off
+      prompts". Hot prompts simulate popular system prompts; cold prompts
+      simulate one-off queries. Exercises both adaptive eviction's reuse
+      signal and prefix_match's cache-hit discrimination.
+
+Each bucket produces a ShareGPT-compatible JSON file at:
+    <output-dir>/bucket_<name>.json
 
 Output format (compatible with experiments/collect_metrics.py --dataset):
-  [{"conversations": [{"from": "human", "value": "..."}]}, ...]
+    [{"conversations": [{"from": "human", "value": "..."}]}, ...]
 
 Usage:
-    python3 scripts/prepare_length_buckets.py \
-        --output-dir /path/to/data/prompt_length
+    python3 scripts/prepare_length_buckets.py                           # skewed (default)
+    python3 scripts/prepare_length_buckets.py --popularity uniform      # v1 control
 """
 
 import argparse
@@ -28,11 +37,16 @@ BUCKETS = {
 }
 
 N_UNIQUE = 20
-N_REPEATS = 10
+# Popularity configs: tuples of (hot_count, hot_repeats, cold_repeats)
+# Both must produce the same total (N_UNIQUE × 10 = 200) for apples-to-apples
+# comparison with equal workload size.
+_POPULARITY = {
+    # uniform: every prompt appears 10 times
+    "uniform": (N_UNIQUE, 10, 10),
+    # skewed: 4 hot × 30 + 16 cold × 5 = 120 + 80 = 200
+    "skewed":  (4, 30, 5),
+}
 
-# Word pool for prefix generation. Each prompt gets a DIFFERENT random sequence
-# drawn from this pool (via a per-prompt seed), so every prompt has a distinct
-# block-hash chain → 20 prompts truly compete for cache space.
 _WORD_POOL = (
     "the quick brown fox jumps over lazy dog cat sat mat sun shone brightly "
     "clear blue sky green hills river flows swiftly through valley ancient "
@@ -70,27 +84,29 @@ QUESTIONS = [
 ]
 
 
-def build_prefix(n_words: int, seed: int) -> str:
-    """Generate a prefix of n_words using a per-prompt seed.
-
-    Different seeds → different word sequences → different block hashes →
-    prompts truly compete for cache space instead of sharing one prefix chain.
-    """
+def build_prefix(n_words, seed):
     rng = random.Random(seed)
     return " ".join(rng.choice(_WORD_POOL) for _ in range(n_words))
 
 
-def generate_bucket(n_prefix_words: int):
-    # 20 DISTINCT prefixes (one per unique prompt) using different seeds.
-    # Each prefix has the same target length but different content.
+def build_repeat_counts(popularity):
+    """Return a list of N_UNIQUE repeat counts (first hot_count are hot)."""
+    hot_count, hot_reps, cold_reps = _POPULARITY[popularity]
+    return [hot_reps] * hot_count + [cold_reps] * (N_UNIQUE - hot_count)
+
+
+def generate_bucket(n_prefix_words, popularity):
     unique_prompts = [
         f"{build_prefix(n_prefix_words, seed=1000 + i)}\n\nQuery: {QUESTIONS[i]}"
         for i in range(N_UNIQUE)
     ]
-    # Repeat each prompt N_REPEATS times, then interleave (not block-repeat)
-    # Interleaving tests scheduling fairness across different requests
-    entries = unique_prompts * N_REPEATS
+    repeats = build_repeat_counts(popularity)
+
+    entries = []
+    for prompt, rep in zip(unique_prompts, repeats):
+        entries.extend([prompt] * rep)
     random.shuffle(entries)
+
     return [
         {"conversations": [{"from": "human", "value": p}]}
         for p in entries
@@ -105,6 +121,9 @@ def main():
         default="/ocean/projects/cis250265p/xli45/opensource/data/prompt_length",
         help="Output directory for bucket JSON files")
     parser.add_argument(
+        "--popularity", choices=sorted(_POPULARITY.keys()), default="skewed",
+        help="Prompt popularity distribution (default: skewed)")
+    parser.add_argument(
         "--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
@@ -112,13 +131,22 @@ def main():
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    hot_count, hot_reps, cold_reps = _POPULARITY[args.popularity]
+    total = hot_count * hot_reps + (N_UNIQUE - hot_count) * cold_reps
+
+    print(f"Popularity: {args.popularity}")
+    print(f"  {hot_count} hot prompts × {hot_reps} repeats = "
+          f"{hot_count * hot_reps} hot requests")
+    print(f"  {N_UNIQUE - hot_count} cold prompts × {cold_reps} repeats = "
+          f"{(N_UNIQUE - hot_count) * cold_reps} cold requests")
+    print(f"  Total: {total} requests per bucket\n")
+
     for bucket_name, cfg in BUCKETS.items():
-        entries = generate_bucket(cfg["n_prefix_words"])
+        entries = generate_bucket(cfg["n_prefix_words"], args.popularity)
         out_path = out / f"bucket_{bucket_name}.json"
         with open(out_path, "w") as f:
             json.dump(entries, f, ensure_ascii=False)
 
-        # Rough token estimate: n_prefix_words * 1.3 ≈ tokens
         sample_len = len(entries[0]["conversations"][0]["value"].split())
         est_tokens = int(sample_len * 1.3)
         print(
@@ -127,8 +155,6 @@ def main():
         )
 
     print(f"\nAll buckets written to: {out}")
-    print(f"Each bucket: {N_UNIQUE} unique prompts × {N_REPEATS} repeats = "
-          f"{N_UNIQUE * N_REPEATS} total requests")
 
 
 if __name__ == "__main__":
