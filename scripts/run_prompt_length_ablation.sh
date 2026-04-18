@@ -1,30 +1,52 @@
 #!/usr/bin/env bash
-# Run the prompt-length ablation experiment (16 configurations).
+# Prompt-length ablation runner — INCREMENTAL by default.
 #
-# Must run on a GPU node with V100 and Singularity available.
+# Layout: 6 logical configs, mapped to the existing directory names so old
+# results in experiments/results/prompt_length_ablation/ are reused:
+#
+#   baseline   LRU   + FCFS              (dir: <bucket>_baseline)    [old]
+#   scheduling LRU   + prefix_match      (dir: <bucket>_scheduling)  [old]
+#   scheme_a   adaptive + FCFS, α=1.0    (dir: <bucket>_eviction)    [old, == Scheme A]
+#   joint_a    adaptive + PFX,  α=1.0    (dir: <bucket>_joint)       [old, == Joint A]
+#   scheme_b   adaptive + FCFS, α=ALPHA  (dir: <bucket>_scheme_b)    [NEW]
+#   joint_b    adaptive + PFX,  α=ALPHA  (dir: <bucket>_joint_b)     [NEW]
+#
+# By default runs only scheme_b + joint_b (the two new ones). Existing runs
+# are skipped because metrics.summary.json already exists.
 #
 # Usage:
-#   ./scripts/run_prompt_length_ablation.sh
-#
-# Override to run a single config (debugging):
-#   ONLY_BUCKET=medium ONLY_CONFIG=baseline ./scripts/run_prompt_length_ablation.sh
+#   ./scripts/run_prompt_length_ablation.sh                # only new configs (8 runs)
+#   CONFIGS="baseline scheduling scheme_a scheme_b joint_a joint_b" \
+#       ./scripts/run_prompt_length_ablation.sh            # force full re-run (24 runs)
+#   ONLY_BUCKET=medium ./scripts/run_prompt_length_ablation.sh
 #
 # Environment variables:
+#   ALPHA                Scheme B alpha (default: 0.7)
+#   CONFIGS              space-separated list (default: "scheme_b joint_b")
 #   SERVER_WAIT_TIMEOUT  seconds to wait for server ready (default: 150)
 #   SERVER_PORT          port for vLLM server (default: 8100)
 
 set -euo pipefail
 
 CURRENT_SERVER_PID=""
+SERVER_LOG=""
+VLLM_PROC_PATTERN="vllm.entrypoints.openai.api_server"
+
+# Always kill any lingering vllm server on script exit (normal, error, or Ctrl+C).
+# Singularity wraps the real python process, so killing only $CURRENT_SERVER_PID
+# leaves orphaned children holding the GPU. pkill by pattern catches them all.
 cleanup() {
-    if [ -n "$CURRENT_SERVER_PID" ]; then
-        echo ""
-        log "Interrupted — killing server (PID $CURRENT_SERVER_PID)..."
-        kill "$CURRENT_SERVER_PID" 2>/dev/null || true
+    local rc=$?
+    echo "" >&2
+    if pgrep -f "$VLLM_PROC_PATTERN" > /dev/null 2>&1; then
+        echo "[cleanup] killing vllm server processes..." >&2
+        pkill -TERM -f "$VLLM_PROC_PATTERN" 2>/dev/null || true
+        sleep 3
+        pkill -KILL -f "$VLLM_PROC_PATTERN" 2>/dev/null || true
     fi
-    exit 1
+    exit "$rc"
 }
-trap cleanup INT TERM
+trap cleanup EXIT INT TERM
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 CONTAINER=/ocean/projects/cis250265p/xli45/opensource/containers/images/vllm.sif
@@ -36,67 +58,98 @@ RESULTS=$VLLM_SRC/experiments/results/prompt_length_ablation
 # ── Config ───────────────────────────────────────────────────────────────────
 SERVER_PORT=${SERVER_PORT:-8100}
 SERVER_WAIT_TIMEOUT=${SERVER_WAIT_TIMEOUT:-150}
-MODEL=$MODELS/Qwen3-8B       # main eval model per project plan
+ALPHA=${ALPHA:-0.7}
+MODEL=$MODELS/Qwen3-8B
 NUM_REQUESTS=200
 MAX_TOKENS=32
-NUM_GPU_BLOCKS=256   # 256 × 16 = 4096 token cache — forces eviction for long prompts
-MAX_MODEL_LEN=4096   # Qwen3-8B supports long context; xlarge prompts ~1700 tok + 32 output
+NUM_GPU_BLOCKS=256
+MAX_MODEL_LEN=4096
 
 BUCKETS=(short medium long xlarge)
+
 declare -A EVICTION=(
     [baseline]=lru
-    [eviction]=adaptive
     [scheduling]=lru
-    [joint]=adaptive
+    [scheme_a]=adaptive
+    [scheme_b]=adaptive
+    [joint_a]=adaptive
+    [joint_b]=adaptive
 )
-declare -A SCHEDULING=(
+declare -A ALPHA_CFG=(
+    [baseline]=1.0
+    [scheduling]=1.0
+    [scheme_a]=1.0
+    [scheme_b]=$ALPHA
+    [joint_a]=1.0
+    [joint_b]=$ALPHA
+)
+declare -A SCHED=(
     [baseline]=fcfs
-    [eviction]=fcfs
     [scheduling]=prefix_match
-    [joint]=prefix_match
+    [scheme_a]=fcfs
+    [scheme_b]=fcfs
+    [joint_a]=prefix_match
+    [joint_b]=prefix_match
 )
-CONFIGS=(baseline eviction scheduling joint)
+# Map logical config name → on-disk dir suffix.
+# Naming follows the convention: {policy}_a{alpha} where policy is one of
+# baseline, sched_only, adaptive, joint. α=1.0 == pure reuse count; α<1 blends recency.
+declare -A DIR_SUFFIX=(
+    [baseline]=baseline
+    [scheduling]=sched_only
+    [scheme_a]=adaptive_a1.0
+    [scheme_b]=adaptive_a0.7
+    [joint_a]=joint_a1.0
+    [joint_b]=joint_a0.7
+)
+
+# Default: full 6-config ablation
+CONFIGS_STR=${CONFIGS:-"baseline scheduling scheme_a scheme_b joint_a joint_b"}
+read -ra CONFIGS_ARR <<< "$CONFIGS_STR"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 wait_for_server() {
-    local port=$1
-    local timeout=$2
-    local elapsed=0
+    local port=$1 timeout=$2 elapsed=0
     echo -n "[$(date '+%H:%M:%S')] Waiting for server (model loading, ~60-90s) "
     while [ "$elapsed" -lt "$timeout" ]; do
         if curl -sf "http://localhost:${port}/health" > /dev/null 2>&1; then
-            echo ""
-            log "Server ready after ${elapsed}s"
-            return 0
+            echo ""; log "Server ready after ${elapsed}s"; return 0
         fi
-        sleep 5
-        elapsed=$((elapsed + 5))
-        echo -n "."
+        sleep 5; elapsed=$((elapsed + 5)); echo -n "."
     done
-    echo ""
-    log "ERROR: server did not become ready in ${timeout}s — check $SERVER_LOG"
+    echo ""; log "ERROR: server did not become ready in ${timeout}s — check $SERVER_LOG"
     return 1
 }
 
 kill_server() {
     local pid=$1
-    if kill -0 "$pid" 2>/dev/null; then
-        log "Stopping server (PID $pid)..."
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
+    log "Stopping server (wrapper PID $pid + vllm children)..."
+    # Kill Singularity wrapper first
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    # Kill orphaned python server process (Singularity wrapper doesn't cascade)
+    pkill -TERM -f "$VLLM_PROC_PATTERN" 2>/dev/null || true
+    sleep 3
+    if pgrep -f "$VLLM_PROC_PATTERN" > /dev/null 2>&1; then
+        log "  still alive after TERM, sending KILL..."
+        pkill -KILL -f "$VLLM_PROC_PATTERN" 2>/dev/null || true
+        sleep 1
+    fi
+    # Confirm port is free
+    if curl -sf "http://localhost:${SERVER_PORT}/health" > /dev/null 2>&1; then
+        log "  WARN: port $SERVER_PORT still serving — another server alive?"
     fi
 }
 
 start_server() {
-    local eviction=$1
-    local scheduling=$2
-    local port=$3
-
-    SERVER_LOG="$RESULTS/server_${eviction}_${scheduling}.log"
-    log "Starting server: eviction=$eviction scheduling=$scheduling port=$port"
-    log "Server log: $SERVER_LOG"
+    local eviction=$1 alpha=$2 scheduling=$3 port=$4
+    # SERVER_LOG is a global so wait_for_server can reference it
+    SERVER_LOG="$RESULTS/server_${eviction}_a${alpha}_${scheduling}.log"
+    # Log to stderr so $(start_server ...) captures only the PID
+    log "Starting server: eviction=$eviction alpha=$alpha scheduling=$scheduling port=$port" >&2
+    log "Server log: $SERVER_LOG" >&2
 
     singularity exec --nv --writable-tmpfs "$CONTAINER" bash -c "
         cp -r $VLLM_SRC/vllm/* /usr/local/lib/python3.12/dist-packages/vllm/ 2>/dev/null
@@ -106,6 +159,7 @@ start_server() {
             --port $port \
             --enable-prefix-caching \
             --eviction-policy $eviction \
+            --eviction-alpha $alpha \
             --scheduling-policy $scheduling \
             --scheduling-max-wait 15 \
             --served-model-name default \
@@ -118,110 +172,89 @@ start_server() {
 }
 
 run_collect() {
-    local bucket=$1
-    local config=$2
-    local out_dir=$3
-    local port=$4
-
-    log "Running benchmark: bucket=$bucket config=$config → $out_dir"
+    local bucket=$1 dir_suffix=$2 out_dir=$3 port=$4
+    log "Running benchmark: bucket=$bucket → $out_dir"
     mkdir -p "$out_dir"
-
-    # All configs use concurrency=8 for a fair comparison:
-    # - 8 in-flight requests > cache capacity (for medium/long/xlarge) → server queues them
-    # - prefix_match scheduler gets a non-trivial queue to reorder (real scheduling test)
-    # - same load for all 4 configs → latency / hit-rate numbers are directly comparable
-    # - vLLM handles over-capacity by queueing (not crashing), which is the realistic case
-    local concurrency=8
-
     singularity exec "$CONTAINER" python3 "$VLLM_SRC/experiments/collect_metrics.py" \
         --server "http://localhost:${port}" \
         --dataset "$DATA/bucket_${bucket}.json" \
         --num-requests "$NUM_REQUESTS" \
         --max-tokens "$MAX_TOKENS" \
-        --concurrency "$concurrency" \
+        --concurrency 8 \
         --output "$out_dir/metrics.jsonl"
 }
 
 # ── Pre-flight checks ─────────────────────────────────────────────────────────
-log "=== Prompt Length Ablation Experiment ==="
+log "=== Prompt Length Ablation (incremental, alpha=${ALPHA}) ==="
 log "Results dir: $RESULTS"
+log "Configs to run: ${CONFIGS_ARR[*]}"
 
-if [ ! -f "$CONTAINER" ]; then
-    echo "ERROR: Container not found: $CONTAINER" >&2; exit 1
-fi
+[ -f "$CONTAINER" ] || { echo "ERROR: Container not found: $CONTAINER" >&2; exit 1; }
 for b in "${BUCKETS[@]}"; do
-    if [ ! -f "$DATA/bucket_${b}.json" ]; then
+    [ -f "$DATA/bucket_${b}.json" ] || {
         echo "ERROR: Data file missing: $DATA/bucket_${b}.json" >&2
         echo "Run: python3 $VLLM_SRC/scripts/prepare_length_buckets.py" >&2
         exit 1
-    fi
+    }
 done
-
 nvidia-smi -L > /dev/null 2>&1 || { echo "ERROR: No GPU detected"; exit 1; }
 mkdir -p "$RESULTS"
 
-# ── Main loop ────────────────────────────────────────────────────────────────
-TOTAL=0
-DONE=0
-for b in "${BUCKETS[@]}"; do
-    for c in "${CONFIGS[@]}"; do
-        TOTAL=$((TOTAL + 1))
-    done
-done
+# Kill any leftover vllm server from previous runs (prevents GPU OOM / port collision)
+if pgrep -f "$VLLM_PROC_PATTERN" > /dev/null 2>&1; then
+    log "WARN: leftover vllm server found, killing before starting..."
+    pkill -TERM -f "$VLLM_PROC_PATTERN" 2>/dev/null || true
+    sleep 3
+    pkill -KILL -f "$VLLM_PROC_PATTERN" 2>/dev/null || true
+    sleep 2
+fi
 
-log "Total runs: $TOTAL (${#BUCKETS[@]} buckets × ${#CONFIGS[@]} configs)"
+# ── Main loop ────────────────────────────────────────────────────────────────
+TOTAL=$(( ${#BUCKETS[@]} * ${#CONFIGS_ARR[@]} ))
+DONE=0
+log "Total runs: $TOTAL (${#BUCKETS[@]} buckets × ${#CONFIGS_ARR[@]} configs)"
 echo ""
 
 for bucket in "${BUCKETS[@]}"; do
-    # Skip if ONLY_BUCKET is set and doesn't match
-    if [ -n "${ONLY_BUCKET:-}" ] && [ "$ONLY_BUCKET" != "$bucket" ]; then
-        continue
-    fi
+    [ -n "${ONLY_BUCKET:-}" ] && [ "$ONLY_BUCKET" != "$bucket" ] && continue
 
-    for config in "${CONFIGS[@]}"; do
-        # Skip if ONLY_CONFIG is set and doesn't match
-        if [ -n "${ONLY_CONFIG:-}" ] && [ "$ONLY_CONFIG" != "$config" ]; then
-            continue
-        fi
+    for config in "${CONFIGS_ARR[@]}"; do
+        [ -n "${ONLY_CONFIG:-}" ] && [ "$ONLY_CONFIG" != "$config" ] && continue
 
         DONE=$((DONE + 1))
-        out_dir="$RESULTS/${bucket}_${config}"
+        suffix="${DIR_SUFFIX[$config]:-$config}"
+        out_dir="$RESULTS/${bucket}_${suffix}"
 
-        # Skip if already done
         if [ -f "$out_dir/metrics.summary.json" ]; then
-            log "[$DONE/$TOTAL] SKIP (already exists): ${bucket}_${config}"
+            log "[$DONE/$TOTAL] SKIP (already exists): ${bucket}_${suffix} (config=$config)"
             continue
         fi
 
-        log "[$DONE/$TOTAL] START: bucket=$bucket config=$config"
+        log "[$DONE/$TOTAL] START: bucket=$bucket config=$config → dir=${bucket}_${suffix}"
 
         eviction="${EVICTION[$config]}"
-        scheduling="${SCHEDULING[$config]}"
+        alpha="${ALPHA_CFG[$config]}"
+        scheduling="${SCHED[$config]}"
 
-        # Start server
-        SERVER_PID=$(start_server "$eviction" "$scheduling" "$SERVER_PORT")
+        SERVER_PID=$(start_server "$eviction" "$alpha" "$scheduling" "$SERVER_PORT")
         CURRENT_SERVER_PID=$SERVER_PID
         log "Server PID: $SERVER_PID"
 
-        # Wait for server to be ready; kill and skip on failure
         if ! wait_for_server "$SERVER_PORT" "$SERVER_WAIT_TIMEOUT"; then
-            kill_server "$SERVER_PID"
+            kill_server "$SERVER_PID"; CURRENT_SERVER_PID=""
             log "WARN: Skipping ${bucket}_${config} — server failed to start"
             continue
         fi
 
-        # Run benchmark
-        if run_collect "$bucket" "$config" "$out_dir" "$SERVER_PORT"; then
-            log "[$DONE/$TOTAL] DONE: ${bucket}_${config}"
+        if run_collect "$bucket" "$suffix" "$out_dir" "$SERVER_PORT"; then
+            log "[$DONE/$TOTAL] DONE: ${bucket}_${suffix}"
         else
-            log "WARN: collect_metrics failed for ${bucket}_${config}"
+            log "WARN: collect_metrics failed for ${bucket}_${suffix}"
         fi
 
-        # Stop server
         CURRENT_SERVER_PID=""
         kill_server "$SERVER_PID"
-        sleep 5   # brief pause before next server start
-
+        sleep 5
         echo ""
     done
 done
@@ -229,6 +262,5 @@ done
 log "=== All runs complete ==="
 log "Results saved to: $RESULTS"
 echo ""
-log "Next step: python3 $VLLM_SRC/scripts/analyze_prompt_length.py \\"
-log "    --results-dir $RESULTS \\"
-log "    --output $RESULTS/plots"
+log "Next step: python3 $VLLM_SRC/scripts/analyze_full_ablation.py \\"
+log "    --results-dir $RESULTS"

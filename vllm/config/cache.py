@@ -87,12 +87,14 @@ class CacheConfig:
     0 < alpha < 1 blends reuse frequency with recency position in the free list
     (Scheme B: score = alpha * reuse_count + (1 - alpha) * recency_rank). Only
     effective when prefix caching is enabled."""
-    eviction_alpha: float = 1.0
+    eviction_alpha: float = 0.9
     """Alpha weight for the adaptive eviction policy.
     score = alpha * reuse_count + (1 - alpha) * recency_rank.
-    Range [0.0, 1.0]: 1.0 = pure reuse count (Scheme A, default),
+    Range [0.0, 1.0]: 1.0 = pure reuse count (Scheme A),
     0.0 = pure recency / LRU-like, intermediate values blend both signals
-    (Scheme B). Only used when --eviction-policy adaptive.
+    (Scheme B). Default 0.9 based on alpha sweep — best hit-rate with
+    lowest latency on medium bucket (Qwen3-8B, V100). Only used when
+    --eviction-policy adaptive.
     """
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
