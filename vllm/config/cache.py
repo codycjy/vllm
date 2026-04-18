@@ -82,9 +82,18 @@ class CacheConfig:
     """Eviction policy for prefix cache blocks:\n
     - "lru" (default): Least Recently Used — evicts the block that was accessed
     the longest time ago. This is vLLM's original behavior.\n
-    - "adaptive": Workload-aware eviction based on online reuse counting —
-    evicts the block with the lowest reuse frequency. Only effective when
-    prefix caching is enabled."""
+    - "adaptive": Workload-aware adaptive eviction. Behavior is controlled by
+    --eviction-alpha: alpha=1.0 (default) uses pure reuse frequency (Scheme A);
+    0 < alpha < 1 blends reuse frequency with recency position in the free list
+    (Scheme B: score = alpha * reuse_count + (1 - alpha) * recency_rank). Only
+    effective when prefix caching is enabled."""
+    eviction_alpha: float = 1.0
+    """Alpha weight for the adaptive eviction policy.
+    score = alpha * reuse_count + (1 - alpha) * recency_rank.
+    Range [0.0, 1.0]: 1.0 = pure reuse count (Scheme A, default),
+    0.0 = pure recency / LRU-like, intermediate values blend both signals
+    (Scheme B). Only used when --eviction-policy adaptive.
+    """
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
     - "sha256" uses Pickle for object serialization before hashing. This is the
@@ -198,6 +207,7 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "eviction_policy",
+            "eviction_alpha",
             "prefix_caching_hash_algo",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",

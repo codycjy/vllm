@@ -35,6 +35,7 @@ scraped at start and end of the run and included in a summary file.
 import argparse
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -139,6 +140,10 @@ def main():
                         help="Synthetic prompt length (if no dataset)")
     parser.add_argument("--output", default="results/metrics.jsonl",
                         help="Output JSONL path")
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="Number of concurrent in-flight requests. "
+                             "Use >1 to test prefix_match scheduling "
+                             "(scheduler needs competing requests to choose from)")
     args = parser.parse_args()
 
     # Ensure output directory exists
@@ -158,22 +163,39 @@ def main():
     metrics_before = scrape_prometheus(args.server)
 
     # Send requests and collect per-request metrics
-    results = []
-    for i, prompt in enumerate(prompts):
-        try:
-            result = send_request(args.server, prompt, args.max_tokens)
-            result["request_id"] = f"req-{i}"
-            result["timestamp"] = datetime.now(
-                timezone.utc).isoformat()
-            results.append(result)
+    concurrency = max(1, args.concurrency)
+    if concurrency > 1:
+        print(f"Sending with concurrency={concurrency} "
+              f"(enables prefix_match scheduling differentiation)")
 
-            if (i + 1) % 10 == 0:
-                print(f"  [{i+1}/{len(prompts)}] "
-                      f"latency={result['e2e_latency_ms']:.0f}ms "
-                      f"prompt={result['prompt_tokens']} "
-                      f"gen={result['completion_tokens']}")
-        except Exception as e:
-            print(f"  [{i+1}/{len(prompts)}] FAILED: {e}")
+    results = []
+    completed = [0]
+
+    def _send(idx_prompt):
+        idx, prompt = idx_prompt
+        result = send_request(args.server, prompt, args.max_tokens)
+        result["request_id"] = f"req-{idx}"
+        result["timestamp"] = datetime.now(timezone.utc).isoformat()
+        return result
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {
+            pool.submit(_send, (i, p)): i
+            for i, p in enumerate(prompts)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                result = future.result()
+                results.append(result)
+                completed[0] += 1
+                if completed[0] % 10 == 0:
+                    print(f"  [{completed[0]}/{len(prompts)}] "
+                          f"latency={result['e2e_latency_ms']:.0f}ms "
+                          f"prompt={result['prompt_tokens']} "
+                          f"gen={result['completion_tokens']}")
+            except Exception as e:
+                print(f"  [req-{idx}] FAILED: {e}")
 
     # Scrape metrics after run
     metrics_after = scrape_prometheus(args.server)

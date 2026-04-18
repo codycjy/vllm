@@ -202,6 +202,7 @@ AGENTS.md
 
 # Results
 *.csv
+/report/
 
 # Python pickle files
 *.pkl

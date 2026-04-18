@@ -152,6 +152,7 @@ class BlockPool:
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
         eviction_policy: str = "lru",
+        eviction_alpha: float = 1.0,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
@@ -166,7 +167,8 @@ class BlockPool:
         # list of free blocks (including eviction candidates when caching is
         # enabled).
         self.free_block_queue = FreeKVCacheBlockQueue(
-            self.blocks, eviction_policy=eviction_policy)
+            self.blocks, eviction_policy=eviction_policy,
+            eviction_alpha=eviction_alpha)
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()

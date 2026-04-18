@@ -427,6 +427,7 @@ class EngineArgs:
     block_size: BlockSize | None = CacheConfig.block_size
     enable_prefix_caching: bool | None = None
     eviction_policy: EvictionPolicy = CacheConfig.eviction_policy
+    eviction_alpha: float = CacheConfig.eviction_alpha
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
@@ -929,6 +930,9 @@ class EngineArgs:
             "--eviction-policy", **cache_kwargs["eviction_policy"]
         )
         cache_group.add_argument(
+            "--eviction-alpha", **cache_kwargs["eviction_alpha"]
+        )
+        cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
         )
         cache_group.add_argument("--cpu-offload-gb", **cache_kwargs["cpu_offload_gb"])
@@ -1425,6 +1429,7 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             eviction_policy=self.eviction_policy,
+            eviction_alpha=self.eviction_alpha,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,

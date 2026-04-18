@@ -224,6 +224,7 @@ class Scheduler(SchedulerInterface):
             max_model_len=self.max_model_len,
             enable_caching=self.cache_config.enable_prefix_caching,
             eviction_policy=self.cache_config.eviction_policy,
+            eviction_alpha=self.cache_config.eviction_alpha,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,

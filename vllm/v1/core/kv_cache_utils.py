@@ -179,9 +179,11 @@ class FreeKVCacheBlockQueue:
         self,
         blocks: list[KVCacheBlock],
         eviction_policy: str = "lru",
+        eviction_alpha: float = 1.0,
     ) -> None:
         self.num_free_blocks = len(blocks)
         self.eviction_policy = eviction_policy
+        self.eviction_alpha = eviction_alpha
         self.reuse_counter: dict[BlockHashWithGroupId, int] = {}
 
         # Initialize doubly links of consecutive blocks
@@ -215,7 +217,9 @@ class FreeKVCacheBlockQueue:
         """Pop the best eviction candidate and reduce num_free_blocks by 1.
 
         When eviction_policy is "lru", pops the front of the queue.
-        When eviction_policy is "adaptive", scans for the lowest reuse count.
+        When eviction_policy is "adaptive", scans for the best eviction score:
+          - alpha=1.0 (Scheme A): score = reuse_count only
+          - 0 < alpha < 1 (Scheme B): score = alpha*reuse + (1-alpha)*recency
         """
         if (
             self.fake_free_list_head.next_free_block is self.fake_free_list_tail
@@ -248,22 +252,42 @@ class FreeKVCacheBlockQueue:
         return first_block
 
     def _popleft_adaptive(self) -> KVCacheBlock:
-        """Adaptive eviction: select the block with the lowest reuse count.
-        Blocks without cached data are preferred (zero-cost eviction)."""
+        """Adaptive eviction (Scheme A/B).
+
+        Scheme A (alpha=1.0): score = reuse_count — pure frequency.
+        Scheme B (alpha<1.0): score = alpha*reuse_count + (1-alpha)*recency_rank
+          where recency_rank is the 0-based position from the LRU head of the
+          free list (0 = oldest = highest eviction priority under pure LRU).
+          Normalised to [0,1] by dividing by (num_free_blocks-1).
+          Unhashed blocks (no cached data) are always preferred as zero-cost.
+        """
+        alpha = self.eviction_alpha
+        use_recency = alpha < 1.0
+
         best_victim: KVCacheBlock | None = None
-        best_score: int = 2**63
+        best_score: float = float("inf")
 
         curr = self.fake_free_list_head.next_free_block
+        position = 0
+        n = max(self.num_free_blocks - 1, 1)  # avoid /0 when only 1 block
+
         while curr is not None and curr is not self.fake_free_list_tail:
             block_hash = curr._block_hash
             if block_hash is None:
+                # Unhashed block: always evict first (score = -inf)
                 best_victim = curr
                 break
-            score = self.reuse_counter.get(block_hash, 0)
+            reuse = self.reuse_counter.get(block_hash, 0)
+            if use_recency:
+                recency_rank = position / n  # 0.0 (oldest) … 1.0 (newest)
+                score = alpha * reuse + (1.0 - alpha) * recency_rank
+            else:
+                score = float(reuse)
             if score < best_score:
                 best_score = score
                 best_victim = curr
             curr = curr.next_free_block
+            position += 1
 
         if best_victim is None:
             raise ValueError("No free blocks available")
@@ -371,7 +395,7 @@ class FreeKVCacheBlockQueue:
 
     def increment_reuse(self, block: KVCacheBlock) -> None:
         """Increment the reuse counter for a block's hash.
-        Only has effect when eviction_policy is "adaptive".
+        Only has effect when eviction_policy is "adaptive" (both Scheme A and B).
         """
         if self.eviction_policy != "adaptive":
             return

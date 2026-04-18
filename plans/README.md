@@ -14,6 +14,7 @@
 | 1 | [数据准备](01_data_preparation.md) | ✅ 完成 | 5 个数据集就绪（ShareGPT/MMLU/Burst/Code/RAG） |
 | 2 | [缓存感知调度器](02_cache_aware_scheduler.md) | ✅ 完成 | PrefixMatchRequestQueue + aging 公平性机制，18 项测试 + GPU 验证 |
 | 3 | [实验验证与执行](03_experiment_validation.md) | 进行中 | 高压驱逐验证 + 自动化实验矩阵 + 分析可视化 |
+| 3a | [Prompt 长度消融](03a_prompt_length_ablation.md) | 进行中 | 4 分桶 × 4 配置 × Qwen3-8B，脚本已就绪，实验运行中 |
 | 4 | 报告与展示 | 未开始 | 论文 + 幻灯片 + demo |
 
 ## 进度总览
