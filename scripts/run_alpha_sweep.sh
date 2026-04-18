@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Alpha sensitivity sweep for Scheme B.
+# Alpha sensitivity sweep for adaptive eviction.
 #
-# Varies alpha ∈ {0.3, 0.5, 0.9} on (short, medium) buckets with adaptive+FCFS.
-# Combined with existing α=0.7 (scheme_b) and α=1.0 (scheme_a / "eviction")
-# results in experiments/results/prompt_length_ablation/, gives a 5-point
-# curve: α ∈ {0.3, 0.5, 0.7, 0.9, 1.0}.
+# Runs adaptive + FCFS over a grid of (alpha, bucket). Each (alpha, bucket)
+# gets a FRESH server (kill + restart between every run) to eliminate any
+# cross-run cache-state / reuse_counter contamination. Slower than sharing
+# the server per alpha (~90s extra per combo for model load) but gives
+# apples-to-apples measurements.
 #
-# Output dirs follow pattern: <bucket>_alpha_<value>  (e.g. medium_alpha_0.3)
+# Output: <bucket>_adaptive_a<alpha>/metrics.{jsonl,summary.json}
 #
 # Usage:  ./scripts/run_alpha_sweep.sh
-# Override buckets:  BUCKETS="medium" ./scripts/run_alpha_sweep.sh
-# Override alphas:   ALPHAS="0.3 0.5" ./scripts/run_alpha_sweep.sh
+# Override: BUCKETS="medium long" ALPHAS="0.3 0.5 0.9" ./scripts/run_alpha_sweep.sh
 
 set -euo pipefail
 
@@ -40,14 +40,13 @@ RESULTS=$VLLM_SRC/experiments/results/prompt_length_ablation
 
 # ── Config ───────────────────────────────────────────────────────────────────
 SERVER_PORT=${SERVER_PORT:-8100}
-SERVER_WAIT_TIMEOUT=${SERVER_WAIT_TIMEOUT:-150}
+SERVER_WAIT_TIMEOUT=${SERVER_WAIT_TIMEOUT:-240}
 MODEL=$MODELS/Qwen3-8B
 NUM_REQUESTS=200
 MAX_TOKENS=32
 NUM_GPU_BLOCKS=256
 MAX_MODEL_LEN=4096
 
-# Sweep axes — override with env vars if needed
 BUCKETS_STR=${BUCKETS:-"short medium"}
 ALPHAS_STR=${ALPHAS:-"0.3 0.5 0.9"}
 read -ra BUCKETS_ARR <<< "$BUCKETS_STR"
@@ -87,9 +86,9 @@ kill_server() {
 }
 
 start_server() {
-    local alpha=$1 port=$2
-    SERVER_LOG="$RESULTS/server_alpha_${alpha}.log"
-    log "Starting server: eviction=adaptive alpha=$alpha scheduling=fcfs port=$port" >&2
+    local alpha=$1 bucket=$2 port=$3
+    SERVER_LOG="$RESULTS/server_alpha_${alpha}_${bucket}.log"
+    log "Starting server: eviction=adaptive alpha=$alpha (bucket=$bucket) port=$port" >&2
     log "Server log: $SERVER_LOG" >&2
 
     singularity exec --nv --writable-tmpfs "$CONTAINER" bash -c "
@@ -124,7 +123,7 @@ run_collect() {
 }
 
 # ── Pre-flight ───────────────────────────────────────────────────────────────
-log "=== Alpha Sweep ==="
+log "=== Alpha Sweep (fresh server per combo) ==="
 log "Buckets: ${BUCKETS_ARR[*]}"
 log "Alphas:  ${ALPHAS_ARR[*]}"
 log "Results dir: $RESULTS"
@@ -144,60 +143,45 @@ if pgrep -f "$VLLM_PROC_PATTERN" > /dev/null 2>&1; then
     sleep 2
 fi
 
-# ── Main loop: server-per-alpha (reuse across buckets) ───────────────────────
-# Key optimization: alpha is a server-startup flag, so for each alpha we only
-# start the server once, then run all buckets against it.
+# ── Main loop: fresh server per (alpha, bucket) ──────────────────────────────
+# Restarts server every iteration so each measurement starts from an empty
+# cache and empty reuse_counter — no cross-run contamination.
 TOTAL=$(( ${#BUCKETS_ARR[@]} * ${#ALPHAS_ARR[@]} ))
 DONE=0
 
 for alpha in "${ALPHAS_ARR[@]}"; do
-    # Check if all buckets for this alpha are already done → skip server start
-    need_server=0
-    for bucket in "${BUCKETS_ARR[@]}"; do
-        out_dir="$RESULTS/${bucket}_adaptive_a${alpha}"
-        [ -f "$out_dir/metrics.summary.json" ] || need_server=1
-    done
-    if [ "$need_server" -eq 0 ]; then
-        for bucket in "${BUCKETS_ARR[@]}"; do
-            DONE=$((DONE + 1))
-            log "[$DONE/$TOTAL] SKIP: ${bucket}_adaptive_a${alpha} (already exists)"
-        done
-        continue
-    fi
-
-    log "--- Starting server for alpha=$alpha ---"
-    SERVER_PID=$(start_server "$alpha" "$SERVER_PORT")
-    CURRENT_SERVER_PID=$SERVER_PID
-    log "Server PID: $SERVER_PID"
-
-    if ! wait_for_server "$SERVER_PORT" "$SERVER_WAIT_TIMEOUT"; then
-        kill_server "$SERVER_PID"; CURRENT_SERVER_PID=""
-        log "WARN: server failed — skipping alpha=$alpha"
-        DONE=$((DONE + ${#BUCKETS_ARR[@]}))
-        continue
-    fi
-
     for bucket in "${BUCKETS_ARR[@]}"; do
         DONE=$((DONE + 1))
         out_dir="$RESULTS/${bucket}_adaptive_a${alpha}"
 
         if [ -f "$out_dir/metrics.summary.json" ]; then
-            log "[$DONE/$TOTAL] SKIP: ${bucket}_adaptive_a${alpha}"
+            log "[$DONE/$TOTAL] SKIP: ${bucket}_adaptive_a${alpha} (already exists)"
             continue
         fi
 
-        log "[$DONE/$TOTAL] RUN: bucket=$bucket alpha=$alpha"
+        log "[$DONE/$TOTAL] START: bucket=$bucket alpha=$alpha"
+
+        SERVER_PID=$(start_server "$alpha" "$bucket" "$SERVER_PORT")
+        CURRENT_SERVER_PID=$SERVER_PID
+        log "Server PID: $SERVER_PID"
+
+        if ! wait_for_server "$SERVER_PORT" "$SERVER_WAIT_TIMEOUT"; then
+            kill_server "$SERVER_PID"; CURRENT_SERVER_PID=""
+            log "WARN: server failed — skipping ${bucket}_alpha_${alpha}"
+            continue
+        fi
+
         if run_collect "$bucket" "$out_dir" "$SERVER_PORT"; then
             log "[$DONE/$TOTAL] DONE: ${bucket}_adaptive_a${alpha}"
         else
             log "WARN: collect_metrics failed for ${bucket}_adaptive_a${alpha}"
         fi
-    done
 
-    CURRENT_SERVER_PID=""
-    kill_server "$SERVER_PID"
-    sleep 5
-    echo ""
+        CURRENT_SERVER_PID=""
+        kill_server "$SERVER_PID"
+        sleep 5
+        echo ""
+    done
 done
 
 log "=== All alpha-sweep runs complete ==="
