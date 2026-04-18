@@ -1,197 +1,263 @@
-# 子计划 4：Prompt 长度消融实验
+# 子计划 3a：Prompt 长度消融实验
 
-> 状态：📋 计划中（待执行）
+> 状态：🔄 v2 进行中（workload 从 uniform → skewed popularity 重做）
 >
-> 目标：验证"prompt 越长，自适应驱逐和缓存感知调度的收益越大"这一核心假设
+> 目标：**回答 TA Q3** — "What's the relationship between the prompt lengths and the performance improvement?"
 >
-> 预计 GPU 时间：~2–3 小时（V100）
+> 负责人：xli45（团队中的 length 维度）；其他维度由队友负责：
+>   - 队友 A：prompt 类型维度（TA Q4）
+>   - 队友 B：workload × cache budget 实验矩阵
 
 ---
 
 ## 1. 实验目标
 
-**核心问题**：不同 prompt 长度下，4 种策略配置的性能差异如何？
+**TA Q3 直译**：我们提出的系统（adaptive eviction + cache-aware scheduling）相对 baseline 的 performance improvement，在 prompt 长度维度上如何变化？
 
-**假设**：
-- 短 prompt（≤256 token）→ cache 压力低 → 4 种策略几乎无差异
-- 长 prompt（≥512 token）→ cache 填满更快 → Adaptive 驱逐保护热前缀的优势显现
-- 超长 prompt（≥1024 token）→ 极高 cache 压力 → 联合优化（Joint）效果最明显
+**交付物**：一张清晰的 "improvement vs length" 曲线，给出以下形式的结论：
+> "Our proposed system delivers up to **+X pp** hit rate improvement / **Y% latency speedup** in the [medium] length regime. The benefit [grows / peaks / plateaus] with length because [机制解释：cache pressure, scheduling queue depth, block granularity]."
 
 ---
 
-## 2. 实验设计
+## 2. v1 → v2 方法论演进（重要）
 
-### 2.1 长度分桶
+### v1 的 workload 问题（2026-04-17 发现）
 
-| Bucket | Token 目标范围 | 生成词数 | 文件名 |
-|--------|---------------|---------|--------|
-| short  | 64–256 tokens | 100 词  | `bucket_short.json` |
-| medium | 256–512 tokens | 320 词  | `bucket_medium.json` |
-| long   | 512–1024 tokens | 700 词  | `bucket_long.json` |
-| xlarge | 1024–1800 tokens | 1300 词 | `bucket_xlarge.json` |
+原 workload（uniform popularity）：
+- 20 unique prompts，每个出现 **10 次**（均匀分布）
+- 每个 prompt 有独立的随机前缀，无共享
+- 固定长度一桶
 
-每个 bucket：**20 个唯一 prompt × 重复 10 次 = 200 条请求**
-- 20 个 prompt 共享同一个长前缀（模拟 system prompt 或文档前缀）
-- 每个 prompt 的结尾有不同的问题编号（保证唯一性）
-- 200 条请求中 prefix caching 命中率理论上最高可达 90%（第 2–10 次重复均命中）
+**观察到的问题**：
+1. `scheme_b` vs `joint_b` 几乎没差别 → scheduling 对 joint 没贡献
+2. `sched_only` vs `baseline` 也几乎没差别 → scheduling 独立效果微弱
+3. 整体故事变成"只有 eviction 有效，scheduling 和 joint 是摆设"，违背 team proposal 的联合优化主张
 
-### 2.2 策略配置
+**根因**：workload 既不激活 eviction 的异质性信号（reuse_count 均匀），也不给 scheduling 创造有意义的等待队列异质性（所有请求 cache-hit 概率相同）。
 
-| # | 配置名 | eviction-policy | scheduling-policy |
-|---|--------|-----------------|------------------|
-| 1 | baseline | lru | fcfs |
-| 2 | eviction | adaptive | fcfs |
-| 3 | scheduling | lru | prefix_match |
-| 4 | joint | adaptive | prefix_match |
+- **Adaptive eviction 需要**：异质 reuse frequency（热前缀 vs 冷前缀）
+- **Prefix_match scheduling 需要**：深等待队列 + 异质 cache-hit 概率
 
-**共 4 × 4 = 16 次运行**
+均匀 popularity 两者都不提供。
 
-### 2.3 Cache 压力设计（精确计算）
+### v2 workload 设计：skewed popularity
 
-模型：**Qwen3-8B**（主评估模型，~16GB on V100 32GB）
-使用 `--num-gpu-blocks-override 256`（256 × 16 = **4096 token** 缓存上限）
+4 个 hot prompt × 30 次 + 16 个 cold prompt × 5 次 = 200 requests（规模不变）。
 
-**驱逐触发阈值 = 256 blocks ÷ 20 unique × 16 tokens/block = 205 tokens/prompt**
+| Workload 属性 | v1 (uniform) | v2 (skewed) |
+|---|---|---|
+| Prompt 分布 | 20 × 10 次 | 4 × 30 次 + 16 × 5 次 |
+| Reuse 频率异质性 | ❌ 均匀 | ✅ 6:1 |
+| Cache-hit 概率异质性 | ❌ | ✅ Hot prompt prefix 常驻 |
+| 总请求数 | 200 | 200 |
 
-| Bucket | 估算 tokens | full blocks/prompt | 20 unique 总需 | 缓存压力 | 驱逐? |
-|--------|------------|-------------------|---------------|---------|------|
-| short  | ~141 tok   | 8 blocks          | 160 blocks    | 0.6x    | ❌ 不驱逐（负对照）|
-| medium | ~429 tok   | 26 blocks         | 520 blocks    | 2.0x    | ✅ 驱逐 |
-| long   | ~919 tok   | 57 blocks         | 1140 blocks   | 4.5x    | ✅ 高压 |
-| xlarge | ~1699 tok  | 106 blocks        | 2120 blocks   | 8.3x    | ✅ 极高压 |
+**模拟现实**：hot prompt = 常见的 system prompt / 高频查询（如 "请总结以下文档"），cold prompt = one-off 查询。这符合 proposal §4.1 "distinguish high-reuse prefixes from one-off prompts" 的目标场景。
 
-### 2.4 Scheduling 并发要求（重要！）
+### v1 数据保留
 
-`prefix_match` 调度需要**多个请求同时在等待队列中**才有意义——调度器必须有"选哪个"的机会。
-
-| 配置 | collect_metrics 并发数 | 原因 |
-|------|----------------------|------|
-| baseline, eviction | `--concurrency 1`（串行）| 驱逐测试不需要并发 |
-| scheduling, joint  | `--concurrency 10`（并发）| 让调度器有 10 个请求可选 |
-
-`run_prompt_length_ablation.sh` 已自动处理这一差异。
+v1 数据已提交到 git（`checkpoint: uniform-popularity length ablation + alpha/cache sweeps`），并移动到 `experiments/results/prompt_length_ablation_old/` 作为：
+1. **方法论对比**：报告里用作 "uniform vs skewed" 的 control，说明 workload 选择的必要性
+2. **回退点**：v2 数据异常时可以对照检查
 
 ---
 
-## 3. 文件结构
+## 3. v2 实验设计
 
-```
-scripts/
-├── prepare_length_buckets.py    # [新建] 生成 4 个分桶数据集
-├── run_prompt_length_ablation.sh # [新建] 跑完全部 16 组实验
-└── analyze_prompt_length.py     # [新建] 汇总结果并出图
+### 3.1 长度分桶（与 v1 一致）
 
-/ocean/projects/cis250265p/xli45/opensource/data/prompt_length/
-├── bucket_short.json            # 200 条请求（short bucket）
-├── bucket_medium.json
-├── bucket_long.json
-└── bucket_xlarge.json
+| Bucket | Token 目标范围 | 前缀词数 | 生成块数 (block_size=16) |
+|--------|---------------|---------|--------------------------|
+| short  | 64–256 tokens | 100 词  | ~8 blocks/prompt |
+| medium | 256–512 tokens | 320 词  | ~26 blocks/prompt |
+| long   | 512–1024 tokens | 700 词  | ~57 blocks/prompt |
+| xlarge | 1024–1800 tokens | 1300 词 | ~106 blocks/prompt |
 
-experiments/results/prompt_length_ablation/
-├── short_baseline/metrics.jsonl + metrics.summary.json
-├── short_eviction/...
-├── short_scheduling/...
-├── short_joint/...
-├── medium_*/...
-├── long_*/...
-└── xlarge_*/...
-```
+### 3.2 Skewed popularity 参数
+
+| Prompt 类别 | 数量 | 每个重复次数 | 总请求 | 占比 |
+|---|---|---|---|---|
+| Hot (高复用) | 4 | 30 | 120 | 60% |
+| Cold (one-off) | 16 | 5 | 80 | 40% |
+| **合计** | 20 | — | 200 | 100% |
+
+6:1 的重复次数比提供足够的 reuse_count 异质性区分 hot 和 cold block。
+
+### 3.3 策略配置（与 v1 一致）
+
+| # | 配置名 | eviction-policy | scheduling-policy | 目的 |
+|---|--------|-----------------|------------------|------|
+| 1 | baseline | lru | fcfs | 对照（原生 vLLM）|
+| 2 | sched_only | lru | prefix_match | 纯调度贡献 |
+| 3 | adaptive_a1.0 | adaptive (α=1.0) | fcfs | Scheme A：纯复用频率 |
+| 4 | adaptive_a0.7 | adaptive (α=0.7) | fcfs | Scheme B：70% 频率 + 30% recency |
+| 5 | joint_a1.0 | adaptive (α=1.0) | prefix_match | Scheme A 联合调度 |
+| 6 | joint_a0.7 | adaptive (α=0.7) | prefix_match | Scheme B 联合调度 |
+
+6 config × 4 bucket = **24 runs**
+
+### 3.4 Cache 压力设计
+
+模型：**Qwen3-8B**，block_size=16
+`--num-gpu-blocks-override 256`（4096 tokens cache）
+
+| Bucket | blocks/prompt | 20 unique 总需 | 压力 | 预期行为 |
+|--------|---------------|---------------|------|---------|
+| short  | ~8   | 160 blocks  | 0.6× | 不驱逐（低压对照）|
+| medium | ~26  | 520 blocks  | 2.0× | 🎯 sweet spot 预期 |
+| long   | ~57  | 1140 blocks | 4.5× | 高压区 |
+| xlarge | ~106 | 2120 blocks | 8.3× | 极高压 |
+
+### 3.5 Skewed 下的新假设（预期结果）
+
+| 策略 | v1 结果（uniform） | v2 预期（skewed） | 机制 |
+|---|---|---|---|
+| `adaptive` | medium 桶 +9.6pp，其他微弱 | 更多桶显著改进 | reuse_count 差距 6:1，热前缀被稳定保护 |
+| `sched_only` | 近似 baseline | long/xlarge 桶 +3-5pp | 深队列下能优先 cached 的 hot 请求 |
+| `joint` | ≈ adaptive alone | long 桶放大效应最明显 | eviction 保 hot → scheduler 优选 hot → 相互增强 |
+
+### 3.6 Client 并发
+
+固定 `concurrency=8`。注意 short/medium 桶下 8 个请求可能全部 running，waiting queue 为 0，scheduling 无效 —— 这是 v2 仍存在的局限（记入 limitation 章节）。
 
 ---
 
-## 4. 环境 Setup
+## 4. 执行步骤
 
-### 4.1 节点申请（你负责）
+### 4.1 环境准备
 
 ```bash
 # 在 Bridges-2 上申请 V100 交互式节点
 interact -p GPU-shared --gres=gpu:v100-32:1 -t 04:00:00
+nvidia-smi   # 确认 GPU 可用
 ```
 
-等分配到 GPU 节点后再执行后续步骤。
+### 4.2 Step 1：备份 v1 数据（已完成）
 
-### 4.2 Step 1：生成数据（登录节点即可，无 GPU）
+已在 plan v2 启动前将：
+- `experiments/results/prompt_length_ablation/` → `experiments/results/prompt_length_ablation_old/`
+- `experiments/results/cache_size_sweep/` → `experiments/results/cache_size_sweep_old/`
+- `/ocean/projects/cis250265p/xli45/opensource/data/prompt_length/*.json` → `/ocean/projects/cis250265p/xli45/opensource/data/prompt_length/old/`
+
+### 4.3 Step 2：生成 v2 skewed 数据（登录节点即可）
 
 ```bash
 cd /ocean/projects/cis250265p/xli45/opensource/dev/vllm
 
-# 检查输出目录
-mkdir -p /ocean/projects/cis250265p/xli45/opensource/data/prompt_length
-
-# 运行数据生成脚本（约 10 秒）
 python3 scripts/prepare_length_buckets.py \
+    --popularity skewed \
     --output-dir /ocean/projects/cis250265p/xli45/opensource/data/prompt_length
 
-# 验证输出
-for f in short medium long xlarge; do
-    echo -n "bucket_${f}.json: "
-    python3 -c "import json; d=json.load(open('/ocean/projects/cis250265p/xli45/opensource/data/prompt_length/bucket_${f}.json')); print(f'{len(d)} entries, first prompt chars: {len(d[0][\"conversations\"][0][\"value\"])}')"
-done
+# 验证：每个 bucket 应有 200 条，其中 120 条来自 4 个 hot prompt，80 条来自 16 个 cold prompt
 ```
 
-### 4.3 Step 2：运行实验（需要 GPU 节点）
+### 4.4 Step 3：运行 v2 完整矩阵（GPU 节点）
 
 ```bash
-# 在 GPU 节点上运行（确认 CUDA 可用）
-nvidia-smi
-
-# 赋予脚本执行权限
-chmod +x /ocean/projects/cis250265p/xli45/opensource/dev/vllm/scripts/run_prompt_length_ablation.sh
-
-# 运行全部 16 组实验（预计 2–3 小时）
-/ocean/projects/cis250265p/xli45/opensource/dev/vllm/scripts/run_prompt_length_ablation.sh
+# 24 runs × ~7 分钟 ≈ 3 小时
+./scripts/run_prompt_length_ablation.sh
 ```
 
-**单独运行某一配置**（调试用）：
-```bash
-# 只跑 medium bucket 的 baseline 配置
-ONLY_BUCKET=medium ONLY_CONFIG=baseline \
-    /ocean/projects/cis250265p/xli45/opensource/dev/vllm/scripts/run_prompt_length_ablation.sh
-```
-
-### 4.4 Step 3：分析结果（登录节点即可）
+### 4.5 Step 4：分析结果（登录节点）
 
 ```bash
-# 生成汇总图表
-python3 scripts/analyze_prompt_length.py \
-    --results-dir experiments/results/prompt_length_ablation \
-    --output experiments/results/prompt_length_ablation/plots
+singularity exec /ocean/projects/cis250265p/xli45/opensource/containers/images/vllm.sif \
+    python3 scripts/analyze_full_ablation.py
 
-# 查看图表
-ls experiments/results/prompt_length_ablation/plots/
+# 出图到 experiments/results/prompt_length_ablation/plots/
 ```
 
 ---
 
-## 5. 关键指标与预期结果
+## 5. 关键指标
 
-| 指标 | 来源 | 预期趋势 |
+| 指标 | 来源 | 预期趋势（v2 skewed） |
 |------|------|---------|
-| **cache_hit_rate** | Prometheus delta | short≈1.0（所有策略），xlarge: joint > scheduling > eviction > baseline |
-| **avg_latency_ms** | per-request JSONL | short：无差别；xlarge：joint 最低 |
-| **eviction_count** | Prometheus delta | short≈0；xlarge：adaptive < lru |
-| **speedup_vs_baseline** | 衍生 | 随 prompt 长度单调增加（对 joint 配置）|
+| **cache_hit_rate** | Prometheus delta | short 接近饱和；medium-long 各策略显著分化 |
+| **avg_latency_ms** | per-request JSONL | 与 hit rate 反相关 |
+| **avg_ttft_ms**（新）| streaming 响应 | cache 命中直接降低 prefill 时间 |
+| **eviction_count** | Prometheus delta | adaptive < lru 应显著，尤其 long 桶 |
+| **improvement vs baseline** | 衍生 | joint 在 medium/long 有 peak |
 
 ---
 
-## 6. 时间估算
+## 6. 预期报告 section 结构
+
+```
+§ Prompt Length Ablation (答 TA Q3)
+
+§.1 Setup
+   - Skewed-popularity synthetic workload
+   - 4 length buckets × 6 configs = 24 runs
+   - Qwen3-8B on V100, cache=256 blocks
+
+§.2 Main Result: Improvement vs Length
+   - Primary figure: (joint vs baseline) gain curve across buckets
+   - Key finding: sweet spot at [medium/long], max +X pp hit rate
+
+§.3 Component Attribution (ablation within ablation)
+   - Decompose improvement: eviction share vs scheduling share
+   - Alpha sensitivity (leverage existing α sweep data)
+
+§.4 Cache Sensitivity (机制)
+   - Cache-size sweep on medium bucket (已有数据)
+   - 2x pressure is the hit-rate sweet spot
+   - Xlarge behaves differently due to block granularity
+
+§.5 Workload Sensitivity (limitation / methodology)
+   - v1 uniform vs v2 skewed comparison
+   - "Without popularity skew, the heterogeneity signal adaptive and
+      prefix-match rely on is absent; strategy differences vanish.
+      We chose skewed popularity to properly exercise the proposed system."
+```
+
+---
+
+## 7. 时间估算
 
 | 步骤 | 时间 | 硬件 |
 |------|------|------|
-| 生成数据（prepare_length_buckets.py） | ~1 分钟 | 登录节点 |
-| 每次实验运行（start server + 200 req + stop） | ~8–12 分钟 | V100 |
-| 全部 16 次运行 | ~2–3 小时 | V100 |
-| 分析出图（analyze_prompt_length.py） | ~2 分钟 | 登录节点 |
-| **总计（GPU 时间）** | **~2–3 小时** | V100 |
+| 备份 v1 数据 | 1 分钟 | 登录节点 |
+| 改 prepare_length_buckets.py 加 --popularity flag | 15 分钟 | 登录节点 |
+| 生成 v2 数据 | 10 秒 | 登录节点 |
+| 跑 24 runs | ~3 小时 | V100 |
+| 分析 + 出图 | 5 分钟 | 登录节点 |
+| 写报告 section | ~4 小时 | 登录节点 |
+| **总计（GPU 时间）** | **~3 小时** | V100 |
 
 ---
 
-## 7. Troubleshooting
+## 8. 已有可复用成果
+
+| 资产 | 位置 | 用途 |
+|------|------|------|
+| Scheme B 实现 | `vllm/v1/core/kv_cache_utils.py::_popleft_adaptive` | α 加权驱逐，已落地 |
+| α sweep 结果 | `prompt_length_ablation_old/` 中 `*_adaptive_a{0.3,0.5,0.7,0.9,1.0}/` | 论文 §3.3 α sensitivity |
+| Cache sweep 结果 | `cache_size_sweep_old/` | 论文 §.4 机制解释 |
+| Run/analyze 脚本 | `scripts/run_prompt_length_ablation.sh`, `analyze_full_ablation.py` | v2 直接复用 |
+| 命名规范 | `{bucket}_{policy}_a{alpha}` | 统一磁盘结构 |
+
+---
+
+## 9. Troubleshooting
 
 | 问题 | 原因 | 解决 |
 |------|------|------|
-| Server 启动超时 | 模型加载慢，CUDA 初始化 | 增大 `SERVER_WAIT_TIMEOUT=180` 环境变量 |
-| `model not found` 错误 | collect_metrics.py 用的 model name "default" | 确认 `--served-model-name default` 已设置 |
-| OOM 错误 | xlarge bucket + num-gpu-blocks-override 太大 | 降低 `--num-gpu-blocks-override` 到 128 |
-| prefix_match 调度下请求超时 | aging 等待时间太长 | 降低 `--scheduling-max-wait` 到 10 |
-| Port 已被占用 | 上一次 server 未退出 | `pkill -f "vllm.entrypoints.openai"` |
+| Server 启动超时 | 模型加载慢 | 增大 `SERVER_WAIT_TIMEOUT=180` |
+| `model not found` | collect_metrics 用 "default" 别名 | 确认 `--served-model-name default` 设置 |
+| OOM | xlarge + concurrency=8 + 长 output | 降 `--num-gpu-blocks-override` 或 `concurrency` |
+| Orphan server 占 GPU | wrapper kill 不级联 | 脚本已用 `pkill -f vllm.entrypoints.openai.api_server` 兜底 |
+| Scheduling 在短桶无效果 | 无 waiting queue | 预期行为，记入 limitation |
+
+---
+
+## 10. 与其他子计划的关系
+
+```
+队友 A (类型维度，TA Q4) ────┐
+                              ├──→ 团队报告
+本子计划 (长度维度，TA Q3) ──┤
+                              │
+队友 B (实验矩阵) ───────────┘
+```
+
+三人数据交汇于报告的 "Evaluation" 章节，分别沿 type × length × workload-cache-budget 三个维度覆盖，形成完整的性能 characterization。
