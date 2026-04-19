@@ -1,0 +1,12 @@
+{
+  "num_requests": 200,
+  "total_time_ms": 857520.36,
+  "avg_latency_ms": 4287.6018,
+  "avg_prompt_tokens": 1346.35,
+  "vllm:prefix_cache_queries_total_delta": 2898021.0,
+  "vllm:prefix_cache_hits_total_delta": 589984.0,
+  "vllm:kv_cache_evictions_total_delta": 9204.0,
+  "vllm:kv_cache_usage_perc": 0.0,
+  "vllm:prefix_cache_utilization": 0.9921568627450981,
+  "prefix_cache_hit_rate": 0.20358168557094652
+}
