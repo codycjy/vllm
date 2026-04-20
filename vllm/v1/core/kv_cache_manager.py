@@ -170,12 +170,19 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
-    def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int]:
+    def get_computed_blocks(
+        self,
+        request: Request,
+        record_stats: bool = True,
+    ) -> tuple[KVCacheBlocks, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
         Args:
             request: The request to get the computed blocks.
+            record_stats: Whether to record prefix cache hit statistics.
+                Set to False when calling for scheduling scoring purposes
+                to avoid inflating the query denominator.
 
         Returns:
             A tuple containing:
@@ -202,7 +209,7 @@ class KVCacheManager:
             )
         )
 
-        if self.log_stats:
+        if record_stats and self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.record(
                 num_tokens=request.num_tokens,

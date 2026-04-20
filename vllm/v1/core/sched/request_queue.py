@@ -234,7 +234,8 @@ class PrefixMatchRequestQueue(RequestQueue):
         - aging_bonus: after max_wait, +0.1 per extra second
         """
         _, num_cached_tokens = (
-            self._kv_cache_manager.get_computed_blocks(request))
+            self._kv_cache_manager.get_computed_blocks(
+                request, record_stats=False))
         prefix_match_ratio = num_cached_tokens / max(request.num_tokens, 1)
 
         wait_time = now - request.arrival_time
