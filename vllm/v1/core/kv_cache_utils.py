@@ -84,6 +84,8 @@ logger = init_logger(__name__)
 # The function `init_none_hash` initializes this variable globally.
 NONE_HASH: BlockHash
 _CBOR_HASH_FUNCTIONS = frozenset({sha256_cbor, xxhash_cbor})
+_PREFIX_AWARE_LIVE_SHARING_WEIGHT = 2
+_PREFIX_AWARE_DEPTH_BONUS_WINDOW = 4
 
 
 def init_none_hash(hash_fn: Callable[[Any], bytes]):
@@ -124,6 +126,12 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # Prefix-aware eviction metadata. These fields are only used by the
+    # "prefix_aware" policy and are reset when the cached hash is evicted.
+    prefix_cache_hits: int = 0
+    max_prefix_ref_cnt: int = 0
+    prefix_depth: int = 0
+
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
@@ -138,6 +146,9 @@ class KVCacheBlock:
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
+        self.prefix_cache_hits = 0
+        self.max_prefix_ref_cnt = 0
+        self.prefix_depth = 0
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
@@ -148,6 +159,9 @@ class KVCacheBlock:
             f"KVCacheBlock(block_id={self.block_id}, "
             f"ref_cnt={self.ref_cnt}, "
             f"_block_hash={self._block_hash!r}, "
+            f"prefix_cache_hits={self.prefix_cache_hits}, "
+            f"max_prefix_ref_cnt={self.max_prefix_ref_cnt}, "
+            f"prefix_depth={self.prefix_depth}, "
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
@@ -216,6 +230,8 @@ class FreeKVCacheBlockQueue:
 
         When eviction_policy is "lru", pops the front of the queue.
         When eviction_policy is "adaptive", scans for the lowest reuse count.
+        When eviction_policy is "prefix_aware", protects reused/shared prefix
+        blocks before falling back to low-value cached blocks.
         """
         if (
             self.fake_free_list_head.next_free_block is self.fake_free_list_tail
@@ -229,6 +245,8 @@ class FreeKVCacheBlockQueue:
 
         if self.eviction_policy == "adaptive":
             return self._popleft_adaptive()
+        if self.eviction_policy == "prefix_aware":
+            return self._popleft_prefix_aware()
         return self._popleft_lru()
 
     def _popleft_lru(self) -> KVCacheBlock:
@@ -271,17 +289,78 @@ class FreeKVCacheBlockQueue:
         self.remove(best_victim)
         return best_victim
 
+    def _prefix_aware_score(self, block: KVCacheBlock) -> int:
+        """Return a protection score for a cached free block.
+
+        A score of 0 means the block has no observed shared-prefix value and
+        should stay in the normal/probation class. Positive scores are treated
+        as protected candidates. Higher scores are evicted later.
+        """
+        block_hash = block._block_hash
+        if block_hash is None:
+            return 0
+
+        reuse_count = self.reuse_counter.get(block_hash, 0)
+        live_sharing_bonus = (
+            max(block.max_prefix_ref_cnt - 1, 0) * _PREFIX_AWARE_LIVE_SHARING_WEIGHT
+        )
+        score = reuse_count + block.prefix_cache_hits + live_sharing_bonus
+
+        if score > 0 and block.prefix_depth > 0:
+            # Earlier blocks in a prefix chain are more likely to represent a
+            # shared system prompt/template. Keep the bonus small so reuse
+            # still dominates.
+            score += max(_PREFIX_AWARE_DEPTH_BONUS_WINDOW - block.prefix_depth, 0)
+
+        return score
+
+    def _popleft_prefix_aware(self) -> KVCacheBlock:
+        """Prefix-aware eviction with logical normal/protected classes.
+
+        Eviction order:
+        1. Uncached blocks, because reusing them has no prefix-cache cost.
+        2. Cached blocks with no observed prefix reuse/sharedness.
+        3. Protected blocks, ordered by lowest protection score.
+
+        This keeps high-value shared prefixes out of the same eviction class
+        as request-local KV while preserving LRU tie-breaking inside a class.
+        """
+        protected_victim: KVCacheBlock | None = None
+        protected_score = 2**63
+
+        curr = self.fake_free_list_head.next_free_block
+        while curr is not None and curr is not self.fake_free_list_tail:
+            if curr._block_hash is None:
+                self.remove(curr)
+                return curr
+
+            score = self._prefix_aware_score(curr)
+            if score == 0:
+                self.remove(curr)
+                return curr
+
+            if score < protected_score:
+                protected_score = score
+                protected_victim = curr
+            curr = curr.next_free_block
+
+        if protected_victim is None:
+            raise ValueError("No free blocks available")
+
+        self.remove(protected_victim)
+        return protected_victim
+
     def popleft_n(self, n: int) -> list[KVCacheBlock]:
         """Pop n eviction candidates.
 
         For LRU, pops from the front (batch-optimized).
-        For adaptive, calls popleft() n times.
+        For adaptive/prefix-aware, calls popleft() n times.
         """
         if n == 0:
             return []
         assert self.num_free_blocks >= n
 
-        if self.eviction_policy == "adaptive":
+        if self.eviction_policy in ("adaptive", "prefix_aware"):
             return [self.popleft() for _ in range(n)]
 
         # LRU fast path
@@ -370,16 +449,17 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks += len(blocks)
 
     def increment_reuse(self, block: KVCacheBlock) -> None:
-        """Increment the reuse counter for a block's hash.
-        Only has effect when eviction_policy is "adaptive".
+        """Increment reuse metadata for a block's hash.
+        Only has effect for reuse-aware eviction policies.
         """
-        if self.eviction_policy != "adaptive":
+        if self.eviction_policy not in ("adaptive", "prefix_aware"):
             return
         block_hash = block._block_hash
         if block_hash is not None:
-            self.reuse_counter[block_hash] = (
-                self.reuse_counter.get(block_hash, 0) + 1
-            )
+            self.reuse_counter[block_hash] = self.reuse_counter.get(block_hash, 0) + 1
+            if self.eviction_policy == "prefix_aware":
+                block.prefix_cache_hits += 1
+                block.max_prefix_ref_cnt = max(block.max_prefix_ref_cnt, block.ref_cnt)
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.

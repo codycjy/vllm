@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for adaptive eviction policy in FreeKVCacheBlockQueue.
+"""Tests for reuse-aware eviction policies in FreeKVCacheBlockQueue.
 
 These tests verify the non-invasive eviction policy switch:
 - "lru" mode behaves identically to the original vLLM implementation.
 - "adaptive" mode evicts blocks with the lowest reuse count.
+- "prefix_aware" mode protects observed shared-prefix blocks.
 - Blocks without cached data (block_hash=None) are always evicted first.
 
 No GPU required — pure Python unit tests.
@@ -11,12 +12,12 @@ No GPU required — pure Python unit tests.
 
 import pytest
 
+from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
     FreeKVCacheBlockQueue,
     KVCacheBlock,
     make_block_hash_with_group_id,
 )
-from vllm.utils.hashing import sha256
 
 pytestmark = pytest.mark.cpu_test
 
@@ -28,6 +29,7 @@ def _make_block_hash(token_id: int, group_id: int = 0):
 
 
 # ─── LRU baseline tests ────────────────────────────────────────────
+
 
 class TestLRUEviction:
     """Verify that eviction_policy='lru' preserves original behavior."""
@@ -61,6 +63,7 @@ class TestLRUEviction:
 
 
 # ─── Adaptive eviction tests ───────────────────────────────────────
+
 
 class TestAdaptiveEviction:
     """Verify that eviction_policy='adaptive' uses reuse counting."""
@@ -219,3 +222,93 @@ class TestAdaptiveEviction:
         unhashed_ids = {v1.block_id, v2.block_id}
         assert unhashed_ids == {1, 3}
         assert queue.num_free_blocks == 3
+
+
+class TestPrefixAwareEviction:
+    """Verify shared-prefix-aware protection semantics."""
+
+    def test_no_hash_blocks_evicted_first(self):
+        blocks = [KVCacheBlock(block_id=i) for i in range(4)]
+        queue = FreeKVCacheBlockQueue(blocks, eviction_policy="prefix_aware")
+
+        blocks[0]._block_hash = _make_block_hash(10)
+        blocks[1]._block_hash = _make_block_hash(20)
+        blocks[3]._block_hash = _make_block_hash(30)
+
+        victim = queue.popleft()
+        assert victim.block_id == 2
+        assert queue.num_free_blocks == 3
+
+    def test_unreused_cached_blocks_evicted_before_protected_prefix(self):
+        blocks = [KVCacheBlock(block_id=i) for i in range(3)]
+        queue = FreeKVCacheBlockQueue(blocks, eviction_policy="prefix_aware")
+
+        blocks[0]._block_hash = _make_block_hash(10)
+        blocks[1]._block_hash = _make_block_hash(20)
+        blocks[2]._block_hash = _make_block_hash(30)
+
+        # A prefix cache hit promotes block 1 into the protected class.
+        queue.increment_reuse(blocks[1])
+
+        victims = queue.popleft_n(3)
+        assert [victim.block_id for victim in victims] == [0, 2, 1]
+
+    def test_live_shared_prefix_metadata_protects_block(self):
+        blocks = [KVCacheBlock(block_id=i) for i in range(2)]
+        queue = FreeKVCacheBlockQueue(blocks, eviction_policy="prefix_aware")
+
+        blocks[0]._block_hash = _make_block_hash(10)
+        blocks[1]._block_hash = _make_block_hash(20)
+        blocks[0].max_prefix_ref_cnt = 3
+
+        # Block 0 is older in LRU order, but its observed live sharing should
+        # protect it while an unshared cached block is available.
+        victim = queue.popleft()
+        assert victim.block_id == 1
+
+    def test_protected_blocks_use_lowest_score_when_normal_pool_empty(self):
+        blocks = [KVCacheBlock(block_id=i) for i in range(3)]
+        queue = FreeKVCacheBlockQueue(blocks, eviction_policy="prefix_aware")
+
+        blocks[0]._block_hash = _make_block_hash(10)
+        blocks[1]._block_hash = _make_block_hash(20)
+        blocks[2]._block_hash = _make_block_hash(30)
+
+        for _ in range(3):
+            queue.increment_reuse(blocks[0])
+        queue.increment_reuse(blocks[1])
+        for _ in range(2):
+            queue.increment_reuse(blocks[2])
+
+        victims = queue.popleft_n(3)
+        assert [victim.block_id for victim in victims] == [1, 2, 0]
+
+    def test_prefix_depth_adds_small_protection_bonus(self):
+        blocks = [KVCacheBlock(block_id=i) for i in range(2)]
+        queue = FreeKVCacheBlockQueue(blocks, eviction_policy="prefix_aware")
+
+        blocks[0]._block_hash = _make_block_hash(10)
+        blocks[1]._block_hash = _make_block_hash(20)
+        blocks[0].prefix_depth = 1
+        blocks[1].prefix_depth = 4
+        queue.increment_reuse(blocks[0])
+        queue.increment_reuse(blocks[1])
+
+        # Both blocks have one hit, but the earlier prefix block gets a small
+        # protection bonus and should be evicted later.
+        victims = queue.popleft_n(2)
+        assert [victim.block_id for victim in victims] == [1, 0]
+
+    def test_increment_reuse_records_prefix_metadata(self):
+        blocks = [KVCacheBlock(block_id=0)]
+        queue = FreeKVCacheBlockQueue(blocks, eviction_policy="prefix_aware")
+
+        block_hash = _make_block_hash(42)
+        blocks[0]._block_hash = block_hash
+        blocks[0].ref_cnt = 2
+
+        queue.increment_reuse(blocks[0])
+
+        assert queue.reuse_counter[block_hash] == 1
+        assert blocks[0].prefix_cache_hits == 1
+        assert blocks[0].max_prefix_ref_cnt == 2

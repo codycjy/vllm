@@ -166,7 +166,8 @@ class BlockPool:
         # list of free blocks (including eviction candidates when caching is
         # enabled).
         self.free_block_queue = FreeKVCacheBlockQueue(
-            self.blocks, eviction_policy=eviction_policy)
+            self.blocks, eviction_policy=eviction_policy
+        )
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
@@ -271,6 +272,8 @@ class BlockPool:
                 block_hash, kv_cache_group_id
             )
             blk.block_hash = block_hash_with_group_id
+            blk.prefix_depth = num_cached_blocks + i + 1
+            blk.max_prefix_ref_cnt = max(blk.max_prefix_ref_cnt, blk.ref_cnt)
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
@@ -348,8 +351,7 @@ class BlockPool:
         reuse_count = 0
         block_hash = block.block_hash
         if block_hash is not None:
-            reuse_count = self.free_block_queue.reuse_counter.get(
-                block_hash, 0)
+            reuse_count = self.free_block_queue.reuse_counter.get(block_hash, 0)
 
         # Clean up metrics tracking first to prevent leaks
         if self.metrics_collector:
