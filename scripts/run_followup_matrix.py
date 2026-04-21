@@ -40,7 +40,7 @@ CONTAINER   = Path("/ocean/projects/cis260009p/jchen60/vllm.sif")
 RESULTS_DIR = REPO_DIR / "experiments" / "results"
 
 MODEL          = "Qwen/Qwen3-8B"
-MAX_MODEL_LEN  = 4096
+MAX_MODEL_LEN  = 1024
 GPU_UTIL       = 0.9
 SERVER_TIMEOUT = 120
 
