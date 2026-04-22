@@ -197,6 +197,10 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks = len(blocks)
         self.eviction_policy = eviction_policy
         self.reuse_counter: dict[BlockHashWithGroupId, int] = {}
+        # Block IDs that the scheduler has pending prefix hits on.
+        # These are refreshed every scheduling step and skipped during eviction
+        # so that a waiting request's cache hit isn't evicted before it runs.
+        self.pending_hit_block_ids: frozenset[int] = frozenset()
 
         # Initialize doubly links of consecutive blocks
         for i in range(self.num_free_blocks):
@@ -250,30 +254,55 @@ class FreeKVCacheBlockQueue:
         return self._popleft_lru()
 
     def _popleft_lru(self) -> KVCacheBlock:
-        """Original LRU eviction: pop the front of the queue."""
-        first_block: KVCacheBlock = self.fake_free_list_head.next_free_block  # type: ignore
+        """Original LRU eviction: pop the front of the queue.
 
-        if first_block.next_free_block is None:
-            raise RuntimeError(
-                "Invalid block found in popleft() "
-                "which doesn't have a valid next_free_block"
-            )
+        Skips blocks in pending_hit_block_ids (scheduler has a waiting request
+        that would hit them). Falls back to the first non-protected block,
+        or the least-recently-used protected block if all are protected.
+        """
+        fallback: KVCacheBlock | None = None
+        curr: KVCacheBlock = self.fake_free_list_head.next_free_block  # type: ignore
+        while curr is not None and curr is not self.fake_free_list_tail:
+            if curr.next_free_block is None:
+                raise RuntimeError(
+                    "Invalid block found in popleft() "
+                    "which doesn't have a valid next_free_block"
+                )
+            if curr.block_id not in self.pending_hit_block_ids:
+                self.remove(curr)
+                return curr
+            if fallback is None:
+                fallback = curr
+            curr = curr.next_free_block
 
-        self.fake_free_list_head.next_free_block = first_block.next_free_block
-        first_block.next_free_block.prev_free_block = self.fake_free_list_head
-        first_block.prev_free_block = first_block.next_free_block = None
-        self.num_free_blocks -= 1
-        return first_block
+        # All blocks are pending-hit-protected; evict the oldest one anyway.
+        if fallback is None:
+            raise ValueError("No free blocks available")
+        self.remove(fallback)
+        return fallback
 
     def _popleft_adaptive(self) -> KVCacheBlock:
         """Adaptive eviction: select the block with the lowest reuse count.
-        Blocks without cached data are preferred (zero-cost eviction)."""
+        Blocks without cached data are preferred (zero-cost eviction).
+        Pending-hit blocks are skipped; if all are protected, falls back to
+        the best victim among protected blocks."""
         best_victim: KVCacheBlock | None = None
         best_score: int = 2**63
+        protected_fallback: KVCacheBlock | None = None
+        protected_fallback_score: int = 2**63
 
         curr = self.fake_free_list_head.next_free_block
         while curr is not None and curr is not self.fake_free_list_tail:
             block_hash = curr._block_hash
+            is_pending = curr.block_id in self.pending_hit_block_ids
+            if is_pending:
+                # Track best fallback among protected blocks
+                score = self.reuse_counter.get(block_hash, 0) if block_hash else -1
+                if score < protected_fallback_score:
+                    protected_fallback_score = score
+                    protected_fallback = curr
+                curr = curr.next_free_block
+                continue
             if block_hash is None:
                 best_victim = curr
                 break
@@ -283,11 +312,11 @@ class FreeKVCacheBlockQueue:
                 best_victim = curr
             curr = curr.next_free_block
 
-        if best_victim is None:
+        victim = best_victim if best_victim is not None else protected_fallback
+        if victim is None:
             raise ValueError("No free blocks available")
-
-        self.remove(best_victim)
-        return best_victim
+        self.remove(victim)
+        return victim
 
     def _prefix_aware_score(self, block: KVCacheBlock) -> int:
         """Return a protection score for a cached free block.
@@ -318,30 +347,34 @@ class FreeKVCacheBlockQueue:
         """Prefix-aware eviction with logical normal/protected classes.
 
         Eviction order:
-        1. Uncached blocks, because reusing them has no prefix-cache cost.
+        1. Uncached blocks (zero-cost eviction).
         2. Cached blocks with no observed prefix reuse/sharedness.
-        3. Protected blocks, ordered by lowest protection score.
+        3. Protected blocks (by prefix_aware score), lowest score first.
 
-        This keeps high-value shared prefixes out of the same eviction class
-        as request-local KV while preserving LRU tie-breaking inside a class.
+        Blocks in pending_hit_block_ids are additionally skipped in classes 1-2;
+        if all candidates are pending-hit-protected, falls back to class 3.
         """
         protected_victim: KVCacheBlock | None = None
         protected_score = 2**63
 
         curr = self.fake_free_list_head.next_free_block
         while curr is not None and curr is not self.fake_free_list_tail:
+            is_pending = curr.block_id in self.pending_hit_block_ids
+
             if curr._block_hash is None:
-                self.remove(curr)
-                return curr
+                if not is_pending:
+                    self.remove(curr)
+                    return curr
+            else:
+                score = self._prefix_aware_score(curr)
+                if score == 0 and not is_pending:
+                    self.remove(curr)
+                    return curr
+                # Track lowest-score candidate as fallback (includes pending)
+                if score < protected_score:
+                    protected_score = score
+                    protected_victim = curr
 
-            score = self._prefix_aware_score(curr)
-            if score == 0:
-                self.remove(curr)
-                return curr
-
-            if score < protected_score:
-                protected_score = score
-                protected_victim = curr
             curr = curr.next_free_block
 
         if protected_victim is None:

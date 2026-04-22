@@ -422,6 +422,19 @@ class KVCacheManager:
         """
         self.block_pool.evict_blocks(block_ids)
 
+    def set_pending_hit_blocks(self, block_ids: frozenset[int]) -> None:
+        """Register blocks that have pending prefix hits in the scheduler queue.
+
+        Called once per scheduling step by the prefix-match scheduler after
+        scoring all waiting requests. Eviction will skip these blocks so a
+        waiting request's cache hit is not destroyed before it can run.
+        """
+        self.block_pool.free_block_queue.pending_hit_block_ids = block_ids
+
+    def clear_pending_hit_blocks(self) -> None:
+        """Clear pending-hit protection. Called after scheduling completes."""
+        self.block_pool.free_block_queue.pending_hit_block_ids = frozenset()
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,

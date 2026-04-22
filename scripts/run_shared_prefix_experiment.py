@@ -63,6 +63,7 @@ CACHE_BUDGETS = {
     "tiny": 256,
     "small": 512,
     "medium": 1024,
+    "large": 1024,
 }
 
 DEFAULT_CONFIGS = ["lru_fcfs", "adaptive_fcfs", "prefix_aware_fcfs"]

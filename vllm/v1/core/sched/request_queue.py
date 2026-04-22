@@ -225,15 +225,17 @@ class PrefixMatchRequestQueue(RequestQueue):
         self._max_wait_seconds = max_wait_seconds
         self._sorted = False
 
-    def _compute_schedule_score(self, request: Request,
-                                now: float) -> float:
-        """Compute scheduling priority score (higher = schedule sooner).
+    def _compute_schedule_score(
+        self, request: Request, now: float
+    ) -> tuple[float, "KVCacheBlocks"]:
+        """Compute scheduling priority score and the matched cached blocks.
 
-        score = prefix_match_ratio + aging_bonus
-        - prefix_match_ratio: cached tokens / total tokens (0~1)
-        - aging_bonus: after max_wait, +0.1 per extra second
+        Returns:
+            (score, computed_blocks) where score = prefix_match_ratio +
+            aging_bonus. computed_blocks is used by _sort_queue to register
+            pending-hit protection on the eviction queue.
         """
-        _, num_cached_tokens = (
+        computed_blocks, num_cached_tokens = (
             self._kv_cache_manager.get_computed_blocks(
                 request, record_stats=False))
         prefix_match_ratio = num_cached_tokens / max(request.num_tokens, 1)
@@ -243,16 +245,31 @@ class PrefixMatchRequestQueue(RequestQueue):
         if wait_time > self._max_wait_seconds:
             aging_bonus = (wait_time - self._max_wait_seconds) * 0.1
 
-        return prefix_match_ratio + aging_bonus
+        return prefix_match_ratio + aging_bonus, computed_blocks
 
     def _sort_queue(self) -> None:
-        """Sort the queue by schedule score (descending)."""
+        """Sort the queue by schedule score (descending).
+
+        Also collects all block IDs that have pending prefix hits across
+        waiting requests and registers them with the KV cache manager so
+        the eviction policy avoids destroying them before they are used.
+        """
         now = time.monotonic()
-        scored = [(self._compute_schedule_score(req, now), i, req)
-                  for i, req in enumerate(self._queue)]
+        pending_block_ids: set[int] = set()
+        scored = []
+        for i, req in enumerate(self._queue):
+            score, computed_blocks = self._compute_schedule_score(req, now)
+            scored.append((score, i, req))
+            for group in computed_blocks.blocks:
+                for blk in group:
+                    pending_block_ids.add(blk.block_id)
+
+        # Register pending-hit blocks so eviction skips them this step.
+        self._kv_cache_manager.set_pending_hit_blocks(
+            frozenset(pending_block_ids))
+
         # Higher score first; tie-break by original order (stable)
         scored.sort(key=lambda x: (-x[0], x[1]))
-
         self._queue.clear()
         self._queue.extend(item[2] for item in scored)
         self._sorted = True
@@ -266,7 +283,10 @@ class PrefixMatchRequestQueue(RequestQueue):
         """Sort if needed, then pop the highest-priority request."""
         if not self._sorted:
             self._sort_queue()
-        return self._queue.popleft()
+        req = self._queue.popleft()
+        if not self._queue:
+            self._kv_cache_manager.clear_pending_hit_blocks()
+        return req
 
     def peek_request(self) -> Request:
         """Sort if needed, then peek at the highest-priority request."""
